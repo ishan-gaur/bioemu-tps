@@ -94,6 +94,8 @@ class FastFolderTrajectory:
         om_home = verify_path(om_home, "om_home")
         ref_data_home = verify_path(ref_data_home, "ref_data_home")
 
+        # Mostly just set these up in case, and to reduce feeling of sunk cost for reading through
+        # the OM dataset code T_T
         self.molecule = Molecule[protein_name.upper()]
         self.topology = md.load_topology(
             om_home / "datasets" / "folded_pdbs" / 
