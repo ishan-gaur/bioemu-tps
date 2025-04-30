@@ -132,3 +132,9 @@ cython_debug/
 *.pth
 *.pt
 
+# Output files
+*.gz
+*.npz
+*.xtc
+*.fasta
+*.pdb
