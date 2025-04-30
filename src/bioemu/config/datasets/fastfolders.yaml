@@ -1,4 +1,5 @@
 _target_: bioemu.datasets.fastfolders.FastFolderTrajectory
 _partial_: true
+
 om_home: /home/ishan/OMBasics/two-for-one-diffusion/
 ref_data_home: /data/ishan/reference_md_sims

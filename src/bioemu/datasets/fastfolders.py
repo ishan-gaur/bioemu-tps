@@ -104,6 +104,7 @@ class FastFolderTrajectory:
         self.std = NORM_STDS[self.molecule]
         self.num_beads = self.topology.n_residues
         self.bead_onehot = torch.eye(self.num_beads)
+        self.masses = [atom.element.mass for atom in list(self.topology.atoms)]
 
         ground_truth_traj = torch.load(
             ref_data_home / self.molecule.value / "gt_traj.pt",
