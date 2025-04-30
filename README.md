@@ -31,7 +31,7 @@ pip install bioemu
 ```
 
 > [!NOTE]
-> The first time `bioemu` is used to sample structures, it will also need to setup [Colabfold](https://github.com/sokrypton/ColabFold) on a separate environment. By default it uses the `colabfold-bioemu` conda environment name, but if you wish to have this changed please manually set the `COLABFOLD_ENVNAME` environment variable accordingly before sampling for the first time.
+> The first time `bioemu` is used to sample structures, it will also setup [Colabfold](https://github.com/sokrypton/ColabFold) on a separate virtual environment for MSA and embedding generation. By default this setup uses the `~/.bioemu_colabfold` directory, but if you wish to have this changed please manually set the `BIOEMU_COLABFOLD_DIR` environment variable accordingly before sampling for the first time.
 
 
 ## Sampling structures
@@ -86,6 +86,9 @@ python -m bioemu.sidechain_relax --pdb-path path/to/topology.pdb --xtc-path path
 
 > [!NOTE]
 > The first time this module is invoked, it will attempt to install `hpacker` and its dependencies into a separate `hpacker` conda environment. If you wish for it to be installed in a different location, please set the `HPACKER_ENVNAME` environment variable before using this module for the first time.
+
+> [!NOTE]
+> The side-chain relaxation code requires `cuda >= 12`.
 
 By default, side-chain reconstruction and local energy minimization are performed (no full MD integration for efficiency reasons).
 Note that the runtime of this code scales with the size of the system.
