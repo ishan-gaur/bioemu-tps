@@ -14,6 +14,8 @@ from bioemu.interpolate.om_lib import center_zero, assert_center_zero
 from bioemu.sample import maybe_download_checkpoint, SUPPORTED_DENOISERS, DEFAULT_DENOISER_CONFIG_DIR
 from bioemu.get_embeds import get_colabfold_embeds
 from bioemu.openfold.utils.rigid_utils import Rigid
+from bioemu.openfold.np.residue_constants import rigid_group_atom_positions
+from bioemu.chemgraph import ChemGraph
 
 
 # class Interpolator(OMInterpolatorWrapper):
@@ -186,20 +188,57 @@ class Interpolator(torch.nn.Module):
         # This order is N, CA, C, so I think we can do the same here
 
         # iterate through the atoms of the protein
+        r_list_R, Q_list_R = [], []
         for residue in self.topology.residues:
             # get the CA, N, C, CB, O atoms
             N_idx = residue.atom("N").index
             CA_idx = residue.atom("CA").index
             C_idx = residue.atom("C").index
-            frame = Rigid.from_3_points(
-                p_neg_x_axis=x_BAX[:, N_idx, :],
-                origin=x_BAX[:, CA_idx, :],
-                p_xy_plane=x_BAX[:, C_idx, :],
+            # frame_3_pts = Rigid.from_3_points(
+            #     p_neg_x_axis=x_BAX[:, N_idx, :],
+            #     origin=x_BAX[:, CA_idx, :],
+            #     p_xy_plane=x_BAX[:, C_idx, :],
+            # )
+            # frame = frame_3_pts
+            frame_from_ref = Rigid.make_transform_from_reference(
+                n_xyz = x_BAX[:, N_idx, :],
+                ca_xyz = x_BAX[:, CA_idx, :],
+                c_xyz = x_BAX[:, C_idx, :],
             )
-            print(frame)
+            frame = frame_from_ref
+            # These two should be the same, but their rotations are different
+            # the third column of both rotations are the same, but the first two are different
+            # this means the z-axes get transformed the same way (which I think is c-alpha to c)
+            # When comparing if the inverse tranformation gets you back to the original, I found
+            # frame_3_pts.invert().apply(x_BAX[:, N_idx, :])
+            # tensor([[-1.4889e+00,  0.0000e+00, -5.9605e-08],
+            #         [-1.5129e+00,  0.0000e+00, -4.7684e-07]])
+            # frame_from_ref.invert().apply(x_BAX[:, N_idx, :])
+            # tensor([[-5.0134e-01,  1.4020e+00, -5.9605e-08],
+            #         [-6.4938e-01,  1.3664e+00, -4.7684e-07]])
+            # idealized_frame[0][2] (getting this from rigid_group_atom_positions)
+            # (-0.525, 1.362, -0.0)
+            # Although the second method consistently seems to get the orientation of the N into the
+            # canonical octant (see the idealized frame in the rigid_group_atom_positions for details)
+            # the errors to reconstructing the idealized frame can actually be much larger than I expected even
+            # for these small peptides--TRP_CAGE in this case deviated by somewherebetween 2.5 and 3.0 angstroms on ALA2
+            N_idealized_X = torch.tensor(rigid_group_atom_positions[residue.name][0][2])
+            N_reconstructed_BX = frame.invert().apply(x_BAX[:, N_idx, :])
+            assert torch.all(torch.norm(N_idealized_X[None, :] - N_reconstructed_BX, dim=1) < 3) # angstroms
+            CA_idealized = torch.tensor(rigid_group_atom_positions[residue.name][1][2])
+            CA_reconstructed_BX = frame.invert().apply(x_BAX[:, CA_idx, :])
+            assert torch.all(torch.norm(CA_idealized[None, :] - CA_reconstructed_BX, dim=1) < 3)
+            C_idealized = torch.tensor(rigid_group_atom_positions[residue.name][2][2])
+            C_reconstructed_BX = frame.invert().apply(x_BAX[:, C_idx, :])
+            assert torch.all(torch.norm(C_idealized[None, :] - C_reconstructed_BX, dim=1) < 3)
+
+            r_list_R.append(frame.get_trans()) # BX
+            Q_list_R.append(frame.get_rots().get_rot_mats()) # BXX
+        
+        r_BRX = torch.stack(r_list_R, dim=1)
+        Q_BRXX = torch.stack(Q_list_R, dim=1)
             
-            
-        return None, None
+        return r_BRX, Q_BRXX
 
 
     def forward(self, x1, x2, z=None):
@@ -216,18 +255,23 @@ class Interpolator(torch.nn.Module):
         n_paths, n_atoms = start_points_BRX.shape[0], start_points_BRX.shape[1]
         force_batch_size = n_paths * n_atoms
 
+        x1 = center_zero(x1)
+        x2 = center_zero(x2)
+        assert_center_zero(x1) # check that the centering worked up to some eps tol 1e-3 angstroms
+        assert_center_zero(x2)
+
         for i in range(n_paths):
             # Crucial: rotate end_points_BRX to match start_points_BRX (since TIC operates on rotationally invariant features)
             end_points_BRX[i] = torch.tensor(
                 kabsch_rotate(end_points_BRX[i].cpu(), start_points_BRX[i].cpu())
             ).to(self.device)
+
         x1 = center_zero(x1)
         x2 = center_zero(x2)
-
         assert_center_zero(x1) # check that the centering worked up to some eps tol 1e-3 angstroms
         assert_center_zero(x2)
 
-        # skipped this bit
+        # skipped this bit TODO figure out if necessary from Sanjeev
         # x1 = x1 / self.norm_factor
         # x2 = x2 / self.norm_factor
 
@@ -235,13 +279,21 @@ class Interpolator(torch.nn.Module):
         original_x2 = x2.clone()
 
         # convert to frame coordinates
-        r1_BRX, Q1_BRX = self.euclidian_to_frame(x1)
-        r2_BRX, Q2_BRX = self.euclidian_to_frame(x2)
+        r1_BRX, Q1_BRXX = self.euclidian_to_frame(x1)
+        r2_BRX, Q2_BRXX = self.euclidian_to_frame(x2)
+
+        batch = ChemGraph(
+            node_orientations=Q1_BRXX,
+            pos=r1_BRX,
+            edge_index=self.topology.edge_index_2R2,
+            single_embeds=self.single_embeds_REs,
+            pair_embeds=self.pair_embeds_R2Ep,
+        ).to(self.device)
         # noise to self.t_lat
         # do linear interpolation for r
         # do spherical interpolation for Q
 
 
         return {
-            "final_path": torch.zeros_like(start_points_BRX) # TODO: implement this, for now just return zeros
+            "final_path": None
         }

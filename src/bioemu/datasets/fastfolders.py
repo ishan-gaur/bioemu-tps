@@ -174,11 +174,8 @@ class FastFolderTrajectory:
             weights_only=False # TODO why did this fail when set to True?
         ) 
         # these are end points sampled from every 100 frames of the ground truth trajectory
-        # so we need to subsample before applying the mask
         self.start_points_FAX = self.ground_truth_traj_FAX[::100][self.start_points_F]
-        self.start_points_FAbX = self.start_points_FAX[:, self.backbone_mask_A]
         self.end_points_FAX = self.ground_truth_traj_FAX[::100][self.end_points_F]
-        self.end_points_FAbX = self.end_points_FAX[:, self.backbone_mask_A]
 
         # Misc properties
         self.std = NORM_STDS[self.molecule]
