@@ -15,7 +15,10 @@ from bioemu.sample import maybe_download_checkpoint, SUPPORTED_DENOISERS, DEFAUL
 from bioemu.get_embeds import get_colabfold_embeds
 from bioemu.openfold.utils.rigid_utils import Rigid
 from bioemu.openfold.np.residue_constants import rigid_group_atom_positions
+<<<<<<< HEAD
 from bioemu.chemgraph import ChemGraph
+=======
+>>>>>>> 88a56d84ebd262e76e3e7d356743350cf5b29096
 
 
 # class Interpolator(OMInterpolatorWrapper):
@@ -281,6 +284,7 @@ class Interpolator(torch.nn.Module):
         # convert to frame coordinates
         r1_BRX, Q1_BRXX = self.euclidian_to_frame(x1)
         r2_BRX, Q2_BRXX = self.euclidian_to_frame(x2)
+<<<<<<< HEAD
 
         batch = ChemGraph(
             node_orientations=Q1_BRXX,
@@ -289,6 +293,8 @@ class Interpolator(torch.nn.Module):
             single_embeds=self.single_embeds_REs,
             pair_embeds=self.pair_embeds_R2Ep,
         ).to(self.device)
+=======
+>>>>>>> 88a56d84ebd262e76e3e7d356743350cf5b29096
         # noise to self.t_lat
         # do linear interpolation for r
         # do spherical interpolation for Q
