@@ -11,6 +11,7 @@ import numpy as np
 class AtomSelection(Enum):
     PROTEIN = "protein"
     A_CARBON = "c-alpha"
+    BACKBONE_5 = "backbone_5"
     ALL = "all"
 
 class Molecule(Enum):
@@ -96,15 +97,15 @@ class FastFolderTrajectory:
             ref_data_home (str | os.PathLike): Path to the reference data home directory.
         Tensor Indices:
             F: Frame (depends on the trajectory, TRP_CAGE has 1044000 total, 1625 starting frames, and 354 ending frames)
-            A: Atom (depends on the trajectory, TRP_CAGE has 20 residues and   atoms)
-            Ab: Backbone Atoms (depends on the trajectory, TRP_CAGE has 20 residues and   atoms)
+            A: Atom (depends on the trajectory, TRP_CAGE has 20 residues and 272 atoms)
+            Ab: Backbone Atoms (depends on the trajectory, TRP_CAGE has 20 residues and 272 atoms)
             R: Residue (C-alpha; number depends on the trajectory, TRP_CAGE has 20 residues)
             X: Spatial coordinates (3)
         """
         # self.mean0 = True # from original class, think not used
         # self.atom_selection = None # from original class, think not used
-        atom_selection = "c-alpha"
-        self.c_alpha = (atom_selection == "c-alpha")
+        atom_selection = AtomSelection.BACKBONE_5
+        self.c_alpha = (atom_selection == AtomSelection.A_CARBON)
         om_home = verify_path(om_home, "om_home")
         ref_data_home = verify_path(ref_data_home, "ref_data_home")
 
@@ -112,19 +113,21 @@ class FastFolderTrajectory:
         # the OM dataset code T_T
         self.molecule = Molecule[protein_name.upper()]
         # Conver the MAE to PDB ising ChimeraX's Save-as functionality
-        self.topology_A = md.load_topology(
+        self.topology = md.load_topology(
             om_home / "datasets" / "folded_pdbs" / 
             f"{self.molecule.value}-from-mae.pdb"
         )
 
         # Get masks to help get atoms of interest from the all atom topologies
-        self.backbone_mask_A = torch.tensor([(atom.name in BACKBONE_ATOMS) for atom in self.topology_A.atoms])
-        self.c_alpha_mask_A = torch.tensor([(atom.name == "CA") for atom in self.topology_A.atoms])
+        # WARNING: Although there are 20 residues, the number of atoms is not 20*5 = 100
+        # because some residues have less than 5 atoms (e.g. GLY)
+        self.backbone_mask_A = torch.tensor([(atom.name in BACKBONE_ATOMS) for atom in self.topology.atoms])
+        self.c_alpha_mask_A = torch.tensor([(atom.name == "CA") for atom in self.topology.atoms])
 
         # It's a bit annoying to find some of these sequences to make sure, but for example, it looks like TRP-CAGE
         # can be found at https://www.rcsb.org/sequence/2M7D
         self.sequence = "".join(
-            [AA_CODE_TO_LETTER[residue.name] for residue in self.topology_A.residues]
+            [AA_CODE_TO_LETTER[residue.name] for residue in self.topology.residues]
         )
 
         self.ground_truth_traj_FAX = torch.load(
@@ -179,9 +182,9 @@ class FastFolderTrajectory:
 
         # Misc properties
         self.std = NORM_STDS[self.molecule]
-        self.num_beads = self.topology_A.n_residues
+        self.num_beads = self.topology.n_residues
         self.bead_onehot_RR = torch.eye(self.num_beads)
-        self.masses_R = [atom.element.mass for i, atom in enumerate(self.topology_A.atoms) if self.c_alpha_mask_A[i]]
+        self.masses_R = [sum([a.element.mass for a in r.atoms]) for r in self.topology.residues] # masses of the residues
 
 
 def to_angstrom(x):

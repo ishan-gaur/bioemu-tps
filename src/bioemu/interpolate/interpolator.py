@@ -13,6 +13,7 @@ from bioemu.interpolate import actions
 from bioemu.interpolate.om_lib import center_zero, assert_center_zero
 from bioemu.sample import maybe_download_checkpoint, SUPPORTED_DENOISERS, DEFAULT_DENOISER_CONFIG_DIR
 from bioemu.get_embeds import get_colabfold_embeds
+from bioemu.openfold.utils.rigid_utils import Rigid
 
 
 # class Interpolator(OMInterpolatorWrapper):
@@ -72,6 +73,8 @@ class Interpolator(torch.nn.Module):
         # sample_latent_time=False,
         # cosine_scheduler=False
     ):
+        if protein_trajectory.c_alpha:
+            raise NotImplementedError("C-alpha not implemented yet, BioEmu requires at least N-CA-C-CB-O")
         # the OMBasics codebase calls this gamma, but m * gamma is actually zeta
         super().__init__()
         self.device = device
@@ -87,12 +90,14 @@ class Interpolator(torch.nn.Module):
         self.optimizer = optimizer
         self.lr = lr
 
-        self.gamma = gamma * torch.tensor(protein_trajectory.masses_A).to(device)
+        self.gamma = gamma * torch.tensor(protein_trajectory.masses_R).to(device)
         self.D = D / protein_trajectory.std ** 2
         self.action = action_cls(dt=self.dt, xi=(1 / self.gamma))
 
         self.score_model, self.sdes, self.denoiser = self.get_bioemu_models()
         self.single_embeds_REs, self.pair_embeds_R2Ep = self.seq_embeds(protein_trajectory)
+        self.sequence = protein_trajectory.sequence
+        self.topology = protein_trajectory.topology
 
     @classmethod
     def get_bioemu_models(cls, denoiser_type="dpm", denoiser_config_path=None):
@@ -149,12 +154,9 @@ class Interpolator(torch.nn.Module):
         pair_embeds = pair_embeds.view(n**2, n_pair_feats)
         return single_embeds, pair_embeds
 
-    def euclidian_to_frame(self, x_BRX):
+    def euclidian_to_frame(self, x_BAX):
         # TODO, this is probably implemented in the bioemu codebase too
-        if self.protein_trajectory.c_alpha:
-            n = x_BRX.shape[0] * 5
-        else:
-            n = x_BRX.shape[0] * 3
+        n = len(self.sequence)
 
         # edges in a fully connected graph
         # formatted as a list of source edges (00..011...1...) and target edges
@@ -166,7 +168,39 @@ class Interpolator(torch.nn.Module):
             ],
             dim=0,
         )
-        pass
+
+        # Rigid.from_3_points implements the gram-schmidt algorithm to get the frame representation in alphafold2
+        # See AlphaFold supplement for details: https://static-content.springer.com/esm/art%3A10.1038%2Fs41586-021-03819-2/MediaObjects/41586_2021_3819_MOESM1_ESM.pdf#page=26.15
+        # Page 27 in PDF reader, section 1.8.1
+        # In the implementation below, we zero index the e-vectors
+        # so converting from the paper:
+        # e_1 = v_1 / ||v_1|| in the algorithm in the paper
+        # where v_1 = x_3 - x_2, which is C - C-alpha
+        # v_2 = x_1 - x_2, which is N - C-alpha
+        # In Rigid.from_3_points, we have
+        # e_0 = origin - p_neg_x_axis
+        # but CA should definitely be the origin
+        # In the openfold codebase, they use this in their datapipeline, supplying as inputs
+        # the first three atoms to these three arguments (see here: https://github.com/aqlaboratory/openfold/blob/e938c184a291bf053af3b14c1e3e8bb29aee57e2/openfold/data/data_transforms.py#L875)
+        # As seen in the resdiue_constants.py file (https://github.com/aqlaboratory/openfold/blob/e938c184a291bf053af3b14c1e3e8bb29aee57e2/openfold/np/residue_constants.py#L143)
+        # This order is N, CA, C, so I think we can do the same here
+
+        # iterate through the atoms of the protein
+        for residue in self.topology.residues:
+            # get the CA, N, C, CB, O atoms
+            N_idx = residue.atom("N").index
+            CA_idx = residue.atom("CA").index
+            C_idx = residue.atom("C").index
+            frame = Rigid.from_3_points(
+                p_neg_x_axis=x_BAX[:, N_idx, :],
+                origin=x_BAX[:, CA_idx, :],
+                p_xy_plane=x_BAX[:, C_idx, :],
+            )
+            print(frame)
+            
+            
+        return None, None
+
 
     def forward(self, x1, x2, z=None):
         n_paths, n_atoms = x1.shape[0], x1.shape[1]
@@ -201,6 +235,8 @@ class Interpolator(torch.nn.Module):
         original_x2 = x2.clone()
 
         # convert to frame coordinates
+        r1_BRX, Q1_BRX = self.euclidian_to_frame(x1)
+        r2_BRX, Q2_BRX = self.euclidian_to_frame(x2)
         # noise to self.t_lat
         # do linear interpolation for r
         # do spherical interpolation for Q

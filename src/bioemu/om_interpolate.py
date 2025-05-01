@@ -31,6 +31,7 @@ def main(
     Tensor Indices:
         B: Batch
         R: Residue
+        Ab: Backbone atom
         X: Spatial coordinates (3)
     """
     assert protein_name in Molecule.__members__, f"Protein {protein_name} not found in the dataset. Please check the name."
@@ -44,11 +45,11 @@ def main(
     protein_trajectory = Trajectory(protein_name=protein_name)
     protein_trajectory = cast(FastFolderTrajectory, protein_trajectory)
     
-    start_points_BRX = protein_trajectory.start_points_FAX.repeat(
-                num_trajectories // len(protein_trajectory.start_points_FAX) + 1, 1, 1
+    start_points_BAbX = protein_trajectory.start_points_FAbX.repeat(
+                num_trajectories // len(protein_trajectory.start_points_FAbX) + 1, 1, 1
             )[:num_trajectories]
-    end_points_BRX = protein_trajectory.end_points_FAX.repeat(
-                num_trajectories // len(protein_trajectory.end_points_FAX) + 1, 1, 1
+    end_points_BAbX = protein_trajectory.end_points_FAbX.repeat(
+                num_trajectories // len(protein_trajectory.end_points_FAbX) + 1, 1, 1
             )[:num_trajectories]
 
     interpolator_config_path = Path(__file__).parent / "config" / "interpolator" / "interpolator.yaml"
@@ -66,8 +67,8 @@ def main(
 
     paths = sample_interpolations_from_model(
         interpolator=bioemu_interpolator,
-        endpoint_1_samples=start_points_BRX,
-        endpoint_2_samples=end_points_BRX,
+        endpoint_1_samples=start_points_BAbX,
+        endpoint_2_samples=end_points_BAbX,
         batch_size=sample_batch_size,
         verbose=False,
         z=None,
