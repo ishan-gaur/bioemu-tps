@@ -15,10 +15,10 @@ from bioemu.sample import maybe_download_checkpoint, SUPPORTED_DENOISERS, DEFAUL
 from bioemu.get_embeds import get_colabfold_embeds
 from bioemu.openfold.utils.rigid_utils import Rigid
 from bioemu.openfold.np.residue_constants import rigid_group_atom_positions
-<<<<<<< HEAD
 from bioemu.chemgraph import ChemGraph
-=======
->>>>>>> 88a56d84ebd262e76e3e7d356743350cf5b29096
+from bioemu.sde_lib import SDE, CosineVPSDE
+from bioemu.so3_sde import SO3SDE, apply_rotvec_to_rotmat
+from typing import cast
 
 
 # class Interpolator(OMInterpolatorWrapper):
@@ -95,11 +95,20 @@ class Interpolator(torch.nn.Module):
         self.optimizer = optimizer
         self.lr = lr
 
-        self.gamma = gamma * torch.tensor(protein_trajectory.masses_R).to(device)
+        self.gamma = gamma * torch.tensor(protein_trajectory.masses_R).to(self.device)
         self.D = D / protein_trajectory.std ** 2
         self.action = action_cls(dt=self.dt, xi=(1 / self.gamma))
 
         self.score_model, self.sdes, self.denoiser = self.get_bioemu_models()
+
+        pos_sde = self.sdes["pos"]
+        assert isinstance(pos_sde, CosineVPSDE)
+        self.pos_sde = cast(CosineVPSDE, pos_sde)
+
+        so3_sde = self.sdes["node_orientations"]
+        assert isinstance(so3_sde, SO3SDE)
+        self.so3_sde = cast(SO3SDE, so3_sde)
+
         self.single_embeds_REs, self.pair_embeds_R2Ep = self.seq_embeds(protein_trajectory)
         self.sequence = protein_trajectory.sequence
         self.topology = protein_trajectory.topology
@@ -160,20 +169,6 @@ class Interpolator(torch.nn.Module):
         return single_embeds, pair_embeds
 
     def euclidian_to_frame(self, x_BAX):
-        # TODO, this is probably implemented in the bioemu codebase too
-        n = len(self.sequence)
-
-        # edges in a fully connected graph
-        # formatted as a list of source edges (00..011...1...) and target edges
-        # (012...012...0...)
-        edge_set_2R2 = torch.cat( 
-            [
-                torch.arange(n).repeat_interleave(n).view(1, n**2),
-                torch.arange(n).repeat(n).view(1, n**2),
-            ],
-            dim=0,
-        )
-
         # Rigid.from_3_points implements the gram-schmidt algorithm to get the frame representation in alphafold2
         # See AlphaFold supplement for details: https://static-content.springer.com/esm/art%3A10.1038%2Fs41586-021-03819-2/MediaObjects/41586_2021_3819_MOESM1_ESM.pdf#page=26.15
         # Page 27 in PDF reader, section 1.8.1
@@ -242,6 +237,43 @@ class Interpolator(torch.nn.Module):
         Q_BRXX = torch.stack(Q_list_R, dim=1)
             
         return r_BRX, Q_BRXX
+    
+    def get_latent_samples(self, r_BRX, Q_BRXX):
+        self.so3_sde.to(self.device)
+        n = len(self.sequence)
+        n_paths = r_BRX.shape[0]
+
+        # edges in a fully connected graph
+        # formatted as a list of source edges (00..011...1...) and target edges
+        # (012...012...0...)
+        edge_set_2R2 = torch.cat( 
+            [
+                torch.arange(n).repeat_interleave(n).view(1, n**2),
+                torch.arange(n).repeat(n).view(1, n**2),
+            ],
+            dim=0,
+        )
+
+        batch = ChemGraph(
+            node_orientations=Q_BRXX,
+            pos=r_BRX,
+            edge_index=edge_set_2R2,
+            single_embeds=self.single_embeds_REs,
+            pair_embeds=self.pair_embeds_R2Ep,
+        ).to(self.device)
+
+        batch = batch.replace(
+            pos=self.pos_sde.sample_marginal(
+                x=batch.pos,
+                t=self.t_lat * torch.ones((n_paths,), device=self.device),
+            ),
+            node_orientations=self.so3_sde.sample_marginal(
+                x=batch.node_orientations,
+                t=self.t_lat * torch.ones((n_paths,), device=self.device),
+            ),
+        )
+        batch = cast(ChemGraph, batch)
+        return batch
 
 
     def forward(self, x1, x2, z=None):
@@ -249,6 +281,7 @@ class Interpolator(torch.nn.Module):
         return self.om_interpolate(x1, x2)
 
     def om_interpolate(self, x1, x2, **kwargs): # kwargs originally had z, the atom identities
+        device = x1.device
         if self.path_batch_size != -1:
             raise NotImplementedError("Batch optimization is not implemented yet.")
         
@@ -282,20 +315,13 @@ class Interpolator(torch.nn.Module):
         original_x2 = x2.clone()
 
         # convert to frame coordinates
-        r1_BRX, Q1_BRXX = self.euclidian_to_frame(x1)
-        r2_BRX, Q2_BRXX = self.euclidian_to_frame(x2)
-<<<<<<< HEAD
+        start_r_BRX, start_Q_BRXX = self.euclidian_to_frame(x1)
+        end_r_BRX, end_Q2_BRXX = self.euclidian_to_frame(x2)
 
-        batch = ChemGraph(
-            node_orientations=Q1_BRXX,
-            pos=r1_BRX,
-            edge_index=self.topology.edge_index_2R2,
-            single_embeds=self.single_embeds_REs,
-            pair_embeds=self.pair_embeds_R2Ep,
-        ).to(self.device)
-=======
->>>>>>> 88a56d84ebd262e76e3e7d356743350cf5b29096
         # noise to self.t_lat
+        start_batch = self.get_latent_samples(start_r_BRX, start_Q_BRXX)
+        end_batch = self.get_latent_samples(end_r_BRX, end_Q2_BRXX)
+
         # do linear interpolation for r
         # do spherical interpolation for Q
 
