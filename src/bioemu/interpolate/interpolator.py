@@ -5,6 +5,7 @@ import hydra
 import torch
 import numpy as np
 from rmsd import kabsch_rotate
+import roma
 
 from bioemu.datasets.fastfolders import FastFolderTrajectory
 from bioemu.models import DiGConditionalScoreModel
@@ -322,9 +323,25 @@ class Interpolator(torch.nn.Module):
         start_batch = self.get_latent_samples(start_r_BRX, start_Q_BRXX)
         end_batch = self.get_latent_samples(end_r_BRX, end_Q2_BRXX)
 
-        # do linear interpolation for r
-        # do spherical interpolation for Q
+        # Path interpolation in latent space
+        interp_level = torch.linspace(
+            0, 1, self.path_length, device=device
+        ) # so finding self.path_length - 2 new points
 
+        # do linear interpolation for r
+        r_PBRX = torch.zeros(
+            (self.path_length, start_r_BRX.shape[0], start_r_BRX.shape[1], 3),
+        )
+        r_PBRX[0] = start_r_BRX
+        r_PBRX[-1] = end_r_BRX
+        for i in range(1, self.path_length - 1):
+            r_PBRX[i] = (1 - interp_level[i]) * start_r_BRX + interp_level[i] * end_r_BRX
+
+        # do spherical interpolation for Q
+        Q_PBRXX = roma.rotmat_slerp(start_Q_BRXX, end_Q2_BRXX, interp_level)
+
+        r_BPRX = r_PBRX.permute(1, 0, 2, 3)
+        Q_BPRXX = Q_PBRXX.permute(1, 0, 2, 3, 4)
 
         return {
             "final_path": None
