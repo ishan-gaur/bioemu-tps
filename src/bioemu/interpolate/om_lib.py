@@ -162,3 +162,31 @@ class OMInterpolatorWrapper(torch.nn.Module):
             truncated_gradient=self.truncated_gradient,
             temperature=self.temperature,
         )
+
+
+def center_zero(x_BRX):
+    """
+    Move the molecule center to zero.
+    """
+    if isinstance(x_BRX, tuple):
+        x_BRX = x_BRX[0]
+    assert len(x_BRX.shape) == 3 and x_BRX.shape[-1] == 3, "Dimensionality error"
+    return x_BRX - x_BRX.mean(dim=1, keepdim=True) # average over residues for each batch and spatial coordinate
+
+
+def assert_center_zero(x, eps=1e-3):
+    """
+    Check if molecule center is at zero within tolerance eps.
+    """
+    assert len(x.shape) == 3 and x.shape[-1] == 3, "Dimensionality error"
+    abs_mean = x.mean(dim=1).abs()
+
+    center_max = abs_mean.max().item()
+
+    if center_max >= eps:
+        max_ind = (abs_mean == abs_mean.max()).nonzero()[0]
+        x_max = x[max_ind[0]]
+        max_dist = torch.norm(x_max[:, None, :] - x_max[None, :, :], dim=-1).max()
+        raise AssertionError(
+            f"Center not at zero: abs max at {center_max} for molecule with max pairwise distance {max_dist}"
+        )

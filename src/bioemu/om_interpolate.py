@@ -1,16 +1,14 @@
+import os
 import yaml
 import hydra
 from pathlib import Path
 
 import torch
 
-from bioemu.datasets.fastfolders import FastFolderTrajectory
+from bioemu.datasets.fastfolders import FastFolderTrajectory, Molecule
 from bioemu.interpolate import sample_interpolations_from_model, OMInterpolatorWrapper
 import bioemu.interpolate as actions
 from bioemu.interpolate import Interpolator
-# from bioemu.interpolate.om_lib import sample_interpolations_from_model, OMInterpolatorWrapper
-# import bioemu.interpolate.actions as actions
-# from bioemu.interpolate.interpolator import Interpolator
 
 from typing import cast
 
@@ -20,7 +18,9 @@ def main(
     num_trajectories: int = 2,
     path_length: int = 100,
     dt: float = 0.001,
-    sample_batch_size: int = 2
+    sample_batch_size: int = 2,
+    output_dir: None | str | os.PathLike = None,
+    seed: int = 0,
 ):
     """
     Main function to get sampled transition paths for fast-folding proteins from the DE Shaw dataset
@@ -33,8 +33,10 @@ def main(
         R: Residue
         X: Spatial coordinates (3)
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+    assert protein_name in Molecule.__members__, f"Protein {protein_name} not found in the dataset. Please check the name."
+    if output_dir is None:
+        output_dir = Path(__file__).parent.parent.parent / "output" / protein_name
+        output_dir.mkdir(parents=True, exist_ok=True) # make sure the directory is editable
     fastfolders_config_path = Path(__file__).parent / "config" / "datasets" / "fastfolders.yaml"
     with open(fastfolders_config_path) as f:
         fastfolders_config = yaml.safe_load(f)
@@ -42,24 +44,26 @@ def main(
     protein_trajectory = Trajectory(protein_name=protein_name)
     protein_trajectory = cast(FastFolderTrajectory, protein_trajectory)
     
-    start_points_BRX = protein_trajectory.start_points_FRX.repeat(
-                num_trajectories // len(protein_trajectory.start_points_FRX) + 1, 1, 1
+    start_points_BRX = protein_trajectory.start_points_FAX.repeat(
+                num_trajectories // len(protein_trajectory.start_points_FAX) + 1, 1, 1
             )[:num_trajectories]
-    end_points_BRX = protein_trajectory.end_points_FRX.repeat(
-                num_trajectories // len(protein_trajectory.end_points_FRX) + 1, 1, 1
+    end_points_BRX = protein_trajectory.end_points_FAX.repeat(
+                num_trajectories // len(protein_trajectory.end_points_FAX) + 1, 1, 1
             )[:num_trajectories]
 
     interpolator_config_path = Path(__file__).parent / "config" / "interpolator" / "interpolator.yaml"
     with open(interpolator_config_path) as f:
         interpolator_config = yaml.safe_load(f)
     FastFolderInterpolator = hydra.utils.instantiate(interpolator_config)
-
-    bioemu_interpolator = FastFolderInterpolator(
-        protein_trajectory=protein_trajectory,
-        dt=dt,
-        path_length=path_length
-    )
     
+    
+    torch.manual_seed(seed)
+    bioemu_interpolator = FastFolderInterpolator(
+        dt=dt,
+        path_length=path_length,
+        protein_trajectory=protein_trajectory,
+    )
+
     paths = sample_interpolations_from_model(
         interpolator=bioemu_interpolator,
         endpoint_1_samples=start_points_BRX,

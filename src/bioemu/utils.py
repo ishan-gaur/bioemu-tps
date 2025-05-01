@@ -5,6 +5,7 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import ParamSpec, TypeVar
+from bioemu.seq_io import parse_sequence, write_fasta
 
 import stackprinter
 
@@ -62,3 +63,14 @@ def print_traceback_on_exception(func: Callable[P, T]) -> Callable[P, T]:
             raise
 
     return with_stackprint
+
+def dump_seqs_to_fasta(sequences: list[str], output_dir: Path) -> None:
+    fasta_path = output_dir / "sequence.fasta"
+    if fasta_path.is_file():
+        if parse_sequence(fasta_path) != sequences:
+            raise ValueError(
+                f"{fasta_path} already exists, but contains a sequence different from {sequence}!"
+            )
+    else:
+        # Save FASTA file in output_dir
+        write_fasta(sequences, fasta_path)

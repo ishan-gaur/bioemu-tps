@@ -1,10 +1,17 @@
 import os
+import re
+import networkx as nx
 from enum import Enum
 from pathlib import Path
 
 import torch
 import mdtraj as md
 import numpy as np
+
+class AtomSelection(Enum):
+    PROTEIN = "protein"
+    A_CARBON = "c-alpha"
+    ALL = "all"
 
 class Molecule(Enum):
     CHIGNOLIN = "CLN025"
@@ -64,6 +71,10 @@ CLUSTER_ENDPOINTS = {
     Molecule.PROTEIN_G: [11, 14],
 }
 
+BACKBONE_ATOMS = [
+    "N", "CA", "C", "O", "CB"
+]
+
 def verify_path(path: str | os.PathLike, var_name: str) -> Path:
     """Check if the path exists."""
     if not isinstance(path, Path):
@@ -85,54 +96,190 @@ class FastFolderTrajectory:
             ref_data_home (str | os.PathLike): Path to the reference data home directory.
         Tensor Indices:
             F: Frame (depends on the trajectory, TRP_CAGE has 1044000 total, 1625 starting frames, and 354 ending frames)
-            R: Residue (depends on protein, TRP_CAGE has 20)
+            A: Atom (depends on the trajectory, TRP_CAGE has 20 residues and   atoms)
+            Ab: Backbone Atoms (depends on the trajectory, TRP_CAGE has 20 residues and   atoms)
+            R: Residue (C-alpha; number depends on the trajectory, TRP_CAGE has 20 residues)
             X: Spatial coordinates (3)
         """
         # self.mean0 = True # from original class, think not used
         # self.atom_selection = None # from original class, think not used
         atom_selection = "c-alpha"
+        self.c_alpha = (atom_selection == "c-alpha")
         om_home = verify_path(om_home, "om_home")
         ref_data_home = verify_path(ref_data_home, "ref_data_home")
 
         # Mostly just set these up in case, and to reduce feeling of sunk cost for reading through
         # the OM dataset code T_T
         self.molecule = Molecule[protein_name.upper()]
-        self.topology = md.load_topology(
+        # Conver the MAE to PDB ising ChimeraX's Save-as functionality
+        self.topology_A = md.load_topology(
             om_home / "datasets" / "folded_pdbs" / 
-            f"{self.molecule.value}-0-{atom_selection}.pdb"
+            f"{self.molecule.value}-from-mae.pdb"
         )
-        self.std = NORM_STDS[self.molecule]
-        self.num_beads = self.topology.n_residues
-        self.bead_onehot = torch.eye(self.num_beads)
-        self.masses = [atom.element.mass for atom in list(self.topology.atoms)]
 
-        ground_truth_traj = torch.load(
-            ref_data_home / self.molecule.value / "gt_traj.pt",
-            weights_only=True
-        ) # shape is (1044000, 20, 3) for 1044000 frames, 20 residues, and 3 spatial coordinates
-        ground_truth_traj -= ground_truth_traj.mean(dim=1, keepdims=True) # center
-        ground_truth_traj *= 10 # convert to angstroms
-        self.ground_truth_traj_FRX = ground_truth_traj
-
-        # To get these run /home/ishan/OMBasics/two-for-one-diffusion/sample.py and set a breakpoint at line 758 for commit 6a8fbfa6
-        # where the call sample_interpolations_from_model as seen below
-        # endpoint_1 = gt_traj[::100][start_points]
-        # endpoint_2 = gt_traj[::100][end_points]
-        # Then run something of the form below in the debugger. This is for the example where the protein is TRP_CAGE (2JOF)
-        # torch.save(endpoint_1, '/data/ishan/reference_md_sims/2JOF/start_points.pt')
-        # torch.save(endpoint_2, '/data/ishan/reference_md_sims/2JOF/end_points.pt')
-        # If desired later on, we'd need to move the TICA plot stuff from sample into this repo to generate these ourselves
-        self.start_points_FRX = torch.load(
-            ref_data_home / self.molecule.value / "start_points.pt",
-            weights_only=True
-        ) # these are start points sampled from every 100 frames of the ground truth trajectory
-        self.end_points_FRX = torch.load(
-            ref_data_home / self.molecule.value / "end_points.pt",
-            weights_only=True
-        ) # these are end points sampled from every 100 frames of the ground truth trajectory
+        # Get masks to help get atoms of interest from the all atom topologies
+        self.backbone_mask_A = torch.tensor([(atom.name in BACKBONE_ATOMS) for atom in self.topology_A.atoms])
+        self.c_alpha_mask_A = torch.tensor([(atom.name == "CA") for atom in self.topology_A.atoms])
 
         # It's a bit annoying to find some of these sequences to make sure, but for example, it looks like TRP-CAGE
         # can be found at https://www.rcsb.org/sequence/2M7D
         self.sequence = "".join(
-            [AA_CODE_TO_LETTER[residue.name] for residue in self.topology.residues]
+            [AA_CODE_TO_LETTER[residue.name] for residue in self.topology_A.residues]
         )
+
+        self.ground_truth_traj_FAX = torch.load(
+            ref_data_home / self.molecule.value / "gt_traj_all_atom.pt",
+            weights_only=True
+        ) # shape is (1044000, 272, 3) 
+        # no longer needed after converting to pdb
+        # mae_to_pdb_map = mae_to_pdb_atom_mapping(self.molecule, om_home, ref_data_home, forward=True)
+        # ground_truth_traj = ground_truth_traj[:, mae_to_pdb_map, :]
+
+        # # make sure the permutation and masks worked by comparing the masked [X] this works
+        # # traj to the coarse-grained one
+        # self.ground_truth_traj_FRX = ground_truth_traj[:, self.c_alpha_mask_A]
+        # pre_saved_gt_traj = torch.load(
+        #     ref_data_home / self.molecule.value / "gt_traj.pt",
+        #     weights_only=True
+        # )
+        # assert torch.allclose(
+        #     self.ground_truth_traj_FRX,
+        #     pre_saved_gt_traj,
+        #     atol=1e-5
+        # ), "Ground truth trajectory does not match the pre-saved one. Check the mae_to_pdb mapping or backbone mask."
+        self.ground_truth_traj_FAX -= self.ground_truth_traj_FAX.mean(dim=1, keepdims=True) # center
+        # Structure files, including this trajectory seem to be saved in nm by default
+        # however, in bioemu/src/bioemu/convert_chemgraph.py, the C-O bond length is in angstroms
+        # so convert everything to angstroms
+        self.ground_truth_traj_FAX = to_angstrom(self.ground_truth_traj_FAX) # convert to angstroms
+
+        # These are the target start and end points for the interpolation
+        # To get these run /home/ishan/OMBasics/two-for-one-diffusion/sample.py and set a breakpoint at line 758 for commit 6a8fbfa6
+        # Right after the calls to
+        # start_points = cluster_assignments == clusters[0]
+        # end_points = cluster_assignments == clusters[1]
+        # Then run something of the form below in the debugger. This is for the example where the protein is TRP_CAGE (2JOF)
+        # torch.save(start_points, '/data/ishan/reference_md_sims/2JOF/start_points.pt')
+        # torch.save(end_points, '/data/ishan/reference_md_sims/2JOF/end_points.pt')
+        # If desired later on, we'd need to move the TICA plot stuff from sample into this repo to generate these ourselves
+        self.start_points_F = torch.load(
+            ref_data_home / self.molecule.value / "start_points.pt",
+            weights_only=False # TODO why did this fail when set to True?
+        )
+        self.end_points_F = torch.load(
+            ref_data_home / self.molecule.value / "end_points.pt",
+            weights_only=False # TODO why did this fail when set to True?
+        ) 
+        # these are end points sampled from every 100 frames of the ground truth trajectory
+        # so we need to subsample before applying the mask
+        self.start_points_FAX = self.ground_truth_traj_FAX[::100][self.start_points_F]
+        self.start_points_FAbX = self.start_points_FAX[:, self.backbone_mask_A]
+        self.end_points_FAX = self.ground_truth_traj_FAX[::100][self.end_points_F]
+        self.end_points_FAbX = self.end_points_FAX[:, self.backbone_mask_A]
+
+        # Misc properties
+        self.std = NORM_STDS[self.molecule]
+        self.num_beads = self.topology_A.n_residues
+        self.bead_onehot_RR = torch.eye(self.num_beads)
+        self.masses_R = [atom.element.mass for i, atom in enumerate(self.topology_A.atoms) if self.c_alpha_mask_A[i]]
+
+
+def to_angstrom(x):
+    """
+    Convert from nanometer to angstrom.
+    """
+    return x * 10.0
+
+def mae_to_pdb_atom_mapping(molecule, om_home, ref_data_home, forward=True):
+    """
+    In the case of all-atom proteins, we need to correct for the fact that the pdb and mae/dcd files have different atom orderings.
+    """
+
+    pdb_topology = md.load_topology(
+        om_home / "datasets" / "folded_pdbs" / 
+        f"{molecule.value}.pdb"
+    ) # 1 chain, 20 residues, 284 atoms, 290 bonds
+    pdb_bonds = torch.tensor(
+        [(bond[0].index, bond[1].index) for bond in pdb_topology.bonds]
+    ) # (290, 2)
+    mae_bonds = extract_bonds_from_mae(
+        om_home / "datasets" / "folded_maes" /
+        f"{molecule.value}-0-protein.mae"
+    ) # (278, 2) TODO why are there 12 less bonds?
+    if forward:
+        return recover_permutation(mae_bonds, pdb_bonds)
+    return recover_permutation(pdb_bonds, mae_bonds)
+
+
+def extract_bonds_from_mae(file_path):
+    """
+    Extract bond indices from a .mae file
+    """
+    with open(file_path, "r") as f:
+        lines = f.readlines()
+
+    bond_section = False
+    bonds = []
+
+    for line in lines:
+        line = line.strip()
+
+        # Detect the start of the m_bond block
+        if line.startswith("m_bond"):
+            bond_section = True
+            continue
+
+        # Detect the end of the block
+        if bond_section and line.startswith("}"):
+            break
+
+        # Skip the header inside the block (first few lines)
+        if bond_section and ":::" in line:
+            continue
+
+        # Extract bond data
+        if bond_section:
+            parts = re.split(r"\s+", line)  # Split by whitespace
+            if len(parts) >= 4:  # Ensure valid data row
+                i_m_from, i_m_to = int(parts[1]), int(parts[2])
+                bonds.append([i_m_from, i_m_to])
+
+    # Convert to torch.Tensor
+    bond_tensor = torch.tensor(bonds, dtype=torch.int64) - 1
+
+    return bond_tensor
+
+
+def recover_permutation(bonds1, bonds2):
+    """
+    Recovers the permutation mapping node indices in the permuted graph (bonds1)
+    to those in the original one (bonds2) using vf2pp_isomorphism from networkx.
+
+    Args:
+        bonds1 (torch.Tensor): Permuted graph edges of shape [N, 2]
+        bonds2 (torch.Tensor): Original graph edges of shape [N, 2]
+
+    Returns:
+        dict or None: A dictionary mapping original node indices to permuted ones if an isomorphism exists, None otherwise.
+    """
+    # Create NetworkX graphs
+    G1 = nx.Graph()
+    G2 = nx.Graph()
+
+    G1.add_edges_from(bonds1.tolist())
+    G2.add_edges_from(bonds2.tolist())
+
+    # Compute isomorphism
+    iso_mapping = nx.vf2pp_isomorphism(G1, G2)
+
+    if iso_mapping is None:
+        return None
+
+    # Convert mapping to tensor
+    max_node = max(max(G1.nodes), max(G2.nodes)) + 1
+    perm_tensor = torch.full((max_node,), -1, dtype=torch.long)
+
+    for perm, orig in iso_mapping.items():
+        perm_tensor[orig] = perm
+
+    return perm_tensor
