@@ -264,12 +264,16 @@ def dpm_solver(
     max_t: float,
     eps_t: float,
     device: torch.device,
+    max_is_start: bool = False,
 ) -> tuple[ChemGraph, ChemGraph, list[ChemGraph] | None, list[ChemGraph] | None]:
 
     """
     Implements the DPM solver for the VPSDE, with the Cosine noise schedule.
     Following this paper: https://arxiv.org/abs/2206.00927 Algorithm 1 DPM-Solver-2.
     DPM solver is used only for positions, not node orientations.
+
+    If max_is_start is True, then the batch is assumed to be the starting point of the trajectory.
+    In this case, the batch is not replaced with a new sample from the prior.
     """
     assert isinstance(batch, ChemGraph)
     assert max_t < 1.0
@@ -281,13 +285,14 @@ def dpm_solver(
     pos_sde = sdes["pos"]
     assert isinstance(pos_sde, CosineVPSDE)
 
-    batch = batch.replace(
-        pos=sdes["pos"].prior_sampling(batch.pos.shape, device=device),
-        node_orientations=sdes["node_orientations"].prior_sampling(
-            batch.node_orientations.shape, device=device
-        ),
-    )
-    batch = cast(ChemGraph, batch)  # help out mypy/linter
+    if not max_is_start:
+        batch = batch.replace(
+            pos=sdes["pos"].prior_sampling(batch.pos.shape, device=device),
+            node_orientations=sdes["node_orientations"].prior_sampling(
+                batch.node_orientations.shape, device=device
+            ),
+        )
+        batch = cast(ChemGraph, batch)  # help out mypy/linter
 
     so3_sde = sdes["node_orientations"]
     assert isinstance(so3_sde, SO3SDE)

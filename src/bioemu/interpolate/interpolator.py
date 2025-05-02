@@ -6,19 +6,21 @@ import torch
 import numpy as np
 from rmsd import kabsch_rotate
 import roma
+from torch_geometric.data.batch import Batch
 
-from bioemu.datasets.fastfolders import FastFolderTrajectory
+from bioemu.datasets.fastfolders import FastFolderTrajectory, BACKBONE_ATOMS
 from bioemu.models import DiGConditionalScoreModel
 from bioemu.sde_lib import SDE
 from bioemu.interpolate import actions
 from bioemu.interpolate.om_lib import center_zero, assert_center_zero
 from bioemu.sample import maybe_download_checkpoint, SUPPORTED_DENOISERS, DEFAULT_DENOISER_CONFIG_DIR
 from bioemu.get_embeds import get_colabfold_embeds
-from bioemu.openfold.utils.rigid_utils import Rigid
+from bioemu.openfold.utils.rigid_utils import Rigid, Rotation
 from bioemu.openfold.np.residue_constants import rigid_group_atom_positions
 from bioemu.chemgraph import ChemGraph
 from bioemu.sde_lib import SDE, CosineVPSDE
 from bioemu.so3_sde import SO3SDE, apply_rotvec_to_rotmat
+from bioemu.denoiser import dpm_solver
 from typing import cast
 
 
@@ -34,6 +36,9 @@ class Interpolator(torch.nn.Module):
     """
 
     BIOEMU_VERSION = "bioemu-v1.0"
+    BIOEMU_T_EPS = 0.001
+    BIOEMU_T_MAX = 0.990
+    BIOEMU_N_DEFAULT = 50
     
     def __init__(self,
         # the user should set these via om_interpolate
@@ -113,6 +118,24 @@ class Interpolator(torch.nn.Module):
         self.single_embeds_REs, self.pair_embeds_R2Ep = self.seq_embeds(protein_trajectory)
         self.sequence = protein_trajectory.sequence
         self.topology = protein_trajectory.topology
+        self.backbone_mask = protein_trajectory.backbone_mask_A
+        self.backbone_atoms = [atom for atom in self.topology.atoms if atom.name in BACKBONE_ATOMS]
+        self.atom_to_backbone_idx = {
+            atom.index: i
+            for i, atom in enumerate(self.backbone_atoms)
+        }
+
+        n = len(self.sequence)
+        # edges in a fully connected graph
+        # formatted as a list of source edges (00..011...1...) and target edges
+        # (012...012...0...)
+        self.edge_set_2R2 = torch.cat( 
+            [
+                torch.arange(n).repeat_interleave(n).view(1, n**2),
+                torch.arange(n).repeat(n).view(1, n**2),
+            ],
+            dim=0,
+        )
 
     @classmethod
     def get_bioemu_models(cls, denoiser_type="dpm", denoiser_config_path=None):
@@ -190,7 +213,7 @@ class Interpolator(torch.nn.Module):
         r_list_R, Q_list_R = [], []
         for residue in self.topology.residues:
             # get the CA, N, C, CB, O atoms
-            N_idx = residue.atom("N").index
+            N_idx = residue.atom("N").index # these indices are over the atomistic representation
             CA_idx = residue.atom("CA").index
             C_idx = residue.atom("C").index
             # frame_3_pts = Rigid.from_3_points(
@@ -204,7 +227,7 @@ class Interpolator(torch.nn.Module):
                 ca_xyz = x_BAX[:, CA_idx, :],
                 c_xyz = x_BAX[:, C_idx, :],
             )
-            frame = frame_from_ref
+            transform = frame_from_ref.to(device=self.device)
             # These two should be the same, but their rotations are different
             # the third column of both rotations are the same, but the first two are different
             # this means the z-axes get transformed the same way (which I think is c-alpha to c)
@@ -221,128 +244,199 @@ class Interpolator(torch.nn.Module):
             # canonical octant (see the idealized frame in the rigid_group_atom_positions for details)
             # the errors to reconstructing the idealized frame can actually be much larger than I expected even
             # for these small peptides--TRP_CAGE in this case deviated by somewherebetween 2.5 and 3.0 angstroms on ALA2
-            N_idealized_X = torch.tensor(rigid_group_atom_positions[residue.name][0][2])
-            N_reconstructed_BX = frame.invert().apply(x_BAX[:, N_idx, :])
+            N_idealized_X = torch.tensor(rigid_group_atom_positions[residue.name][0][2], device=self.device)
+            N_reconstructed_BX = transform.invert().apply(x_BAX[:, N_idx, :]).to(self.device)
             assert torch.all(torch.norm(N_idealized_X[None, :] - N_reconstructed_BX, dim=1) < 3) # angstroms
-            CA_idealized = torch.tensor(rigid_group_atom_positions[residue.name][1][2])
-            CA_reconstructed_BX = frame.invert().apply(x_BAX[:, CA_idx, :])
+            CA_idealized = torch.tensor(rigid_group_atom_positions[residue.name][1][2], device=self.device)
+            CA_reconstructed_BX = transform.invert().apply(x_BAX[:, CA_idx, :]).to(self.device)
             assert torch.all(torch.norm(CA_idealized[None, :] - CA_reconstructed_BX, dim=1) < 3)
-            C_idealized = torch.tensor(rigid_group_atom_positions[residue.name][2][2])
-            C_reconstructed_BX = frame.invert().apply(x_BAX[:, C_idx, :])
+            C_idealized = torch.tensor(rigid_group_atom_positions[residue.name][2][2], device=self.device)
+            C_reconstructed_BX = transform.invert().apply(x_BAX[:, C_idx, :]).to(self.device)
             assert torch.all(torch.norm(C_idealized[None, :] - C_reconstructed_BX, dim=1) < 3)
 
-            r_list_R.append(frame.get_trans()) # BX
-            Q_list_R.append(frame.get_rots().get_rot_mats()) # BXX
+            r_list_R.append(transform.get_trans()) # BX
+            Q_list_R.append(transform.get_rots().get_rot_mats()) # BXX
         
         r_BRX = torch.stack(r_list_R, dim=1)
         Q_BRXX = torch.stack(Q_list_R, dim=1)
             
         return r_BRX, Q_BRXX
+
+    def frame_to_euclidian(self, r_BRX, Q_BRXX):
+        # iterate through the atoms of the protein
+        n_backbone = len(self.atom_to_backbone_idx) # only has entries for backbone atoms
+        r_BRX, Q_BRXX = r_BRX.to(self.device), Q_BRXX.to(self.device)
+        x_BAbX = torch.zeros((r_BRX.shape[0], n_backbone, 3), device=self.device)
+        atoms_set = 0
+        for i, residue in enumerate(self.topology.residues):
+            frame_transform = Rigid(Rotation(rot_mats=Q_BRXX[:, i]), r_BRX[:, i])
+            idealized_frame = rigid_group_atom_positions[residue.name] # these are the frames with atoms in canonical positions, and c-alpha at origin
+            # these frames are list of tuples: element letter, atom type (ie 0 is backbone, 1, 2, ... are sidechain atoms), and the coordinates
+            residue_backbone_atoms = [atom for atom in idealized_frame if atom[0] in BACKBONE_ATOMS]
+            idealized_x_AX = torch.stack([torch.tensor(atom[2]) for atom in residue_backbone_atoms], dim=0).to(self.device)
+            idealized_x_BAX = torch.tile(idealized_x_AX[None, :, :], (r_BRX.shape[0], 1, 1))
+            for atom_res_idx, atom in enumerate(residue_backbone_atoms):
+                atom_idx = residue.atom(atom[0]).index
+                assert atom_idx in self.atom_to_backbone_idx, f"Attempted to set atom {atom} at index {atom_idx} which is not a backbone atom"
+                backbone_idx = self.atom_to_backbone_idx[atom_idx]
+                # make sure this atom has not already been set
+                assert torch.all(x_BAbX[:, backbone_idx, :] == torch.zeros_like(x_BAbX[:, backbone_idx, :]))
+                x_BAbX[:, backbone_idx, :] = frame_transform.apply(idealized_x_BAX[:, atom_res_idx, :])
+                atoms_set += 1
+        assert atoms_set == n_backbone, f"Not all atoms were set, only {atoms_set} out of {n_backbone}"
+        return x_BAbX
     
     def get_latent_samples(self, r_BRX, Q_BRXX):
         self.so3_sde.to(self.device)
-        n = len(self.sequence)
         n_paths = r_BRX.shape[0]
 
-        # edges in a fully connected graph
-        # formatted as a list of source edges (00..011...1...) and target edges
-        # (012...012...0...)
-        edge_set_2R2 = torch.cat( 
-            [
-                torch.arange(n).repeat_interleave(n).view(1, n**2),
-                torch.arange(n).repeat(n).view(1, n**2),
-            ],
-            dim=0,
+        lat_r_BRX = self.pos_sde.sample_marginal(
+            x=r_BRX,
+            t=self.t_lat * torch.ones((n_paths,), device=self.device),
         )
-
-        batch = ChemGraph(
-            node_orientations=Q_BRXX,
-            pos=r_BRX,
-            edge_index=edge_set_2R2,
-            single_embeds=self.single_embeds_REs,
-            pair_embeds=self.pair_embeds_R2Ep,
-        ).to(self.device)
-
-        batch = batch.replace(
-            pos=self.pos_sde.sample_marginal(
-                x=batch.pos,
-                t=self.t_lat * torch.ones((n_paths,), device=self.device),
-            ),
-            node_orientations=self.so3_sde.sample_marginal(
-                x=batch.node_orientations,
-                t=self.t_lat * torch.ones((n_paths,), device=self.device),
-            ),
+        lat_Q_BRXX = self.so3_sde.sample_marginal(
+            x=Q_BRXX,
+            t=self.t_lat * torch.ones((n_paths,), device=self.device),
         )
+        batch = Batch.from_data_list([
+            ChemGraph(
+                node_orientations=lat_Q_BRXX[i],
+                pos=lat_r_BRX[i],
+                edge_index=self.edge_set_2R2,
+                single_embeds=self.single_embeds_REs,
+                pair_embeds=self.pair_embeds_R2Ep,
+            )
+            for i in range(r_BRX.shape[0])
+        ]).to(self.device)
         batch = cast(ChemGraph, batch)
         return batch
 
 
     def forward(self, x1, x2, z=None):
-        n_paths, n_atoms = x1.shape[0], x1.shape[1]
         return self.om_interpolate(x1, x2)
 
-    def om_interpolate(self, x1, x2, **kwargs): # kwargs originally had z, the atom identities
-        device = x1.device
+    def om_interpolate(self, start_x_BAX, end_x_BAX, **kwargs): # kwargs originally had z, the atom identities
         if self.path_batch_size != -1:
             raise NotImplementedError("Batch optimization is not implemented yet.")
+
+        n_paths = start_x_BAX.shape[0]
+        n_residues = len(list(self.topology.residues))
+        start_x_BAX, end_x_BAX = start_x_BAX.to(self.device), end_x_BAX.to(self.device)
         
-        start_points_BRX = x1
-        end_points_BRX = x2
-
-        n_paths, n_atoms = start_points_BRX.shape[0], start_points_BRX.shape[1]
-        force_batch_size = n_paths * n_atoms
-
-        x1 = center_zero(x1)
-        x2 = center_zero(x2)
-        assert_center_zero(x1) # check that the centering worked up to some eps tol 1e-3 angstroms
-        assert_center_zero(x2)
+        start_x_BAX = center_zero(start_x_BAX)
+        end_x_BAX = center_zero(end_x_BAX)
+        assert_center_zero(start_x_BAX) # check that the centering worked up to some eps tol 1e-3 angstroms
+        assert_center_zero(end_x_BAX)
 
         for i in range(n_paths):
             # Crucial: rotate end_points_BRX to match start_points_BRX (since TIC operates on rotationally invariant features)
-            end_points_BRX[i] = torch.tensor(
-                kabsch_rotate(end_points_BRX[i].cpu(), start_points_BRX[i].cpu())
+            end_x_BAX[i] = torch.tensor(
+                kabsch_rotate(end_x_BAX[i].cpu(), start_x_BAX[i].cpu())
             ).to(self.device)
 
-        x1 = center_zero(x1)
-        x2 = center_zero(x2)
-        assert_center_zero(x1) # check that the centering worked up to some eps tol 1e-3 angstroms
-        assert_center_zero(x2)
+        start_x_BAX = center_zero(start_x_BAX)
+        end_x_BAX = center_zero(end_x_BAX)
+        assert_center_zero(start_x_BAX) # check that the centering worked up to some eps tol 1e-3 angstroms
+        assert_center_zero(end_x_BAX)
 
         # skipped this bit TODO figure out if necessary from Sanjeev
-        # x1 = x1 / self.norm_factor
-        # x2 = x2 / self.norm_factor
+        # start_x_BAX = start_x_BAX / self.norm_factor (originally x1 / self.norm_factor)
+        # end_x_BAX = end_x_BAX / self.norm_factor
 
-        original_x1 = x1.clone()
-        original_x2 = x2.clone()
+        og_start_x_BAX = start_x_BAX.clone()
+        og_end_x_BAX = end_x_BAX.clone()
 
         # convert to frame coordinates
-        start_r_BRX, start_Q_BRXX = self.euclidian_to_frame(x1)
-        end_r_BRX, end_Q2_BRXX = self.euclidian_to_frame(x2)
+        start_r_BRX, start_Q_BRXX = self.euclidian_to_frame(start_x_BAX)
+        end_r_BRX, end_Q2_BRXX = self.euclidian_to_frame(end_x_BAX)
+        end_x_BAbX_reconstructed = self.frame_to_euclidian(end_r_BRX, end_Q2_BRXX) # check that the reconstruction works
+        end_x_BabX = og_end_x_BAX[:, self.backbone_mask, :]
+        assert torch.norm(end_x_BAbX_reconstructed - end_x_BabX, dim=2).max() < 3, f"Reconstruction error on endpoint too large: {torch.norm(end_x_BAbX_reconstructed - end_x_BabX, dim=2).max().item()}"
 
         # noise to self.t_lat
-        start_batch = self.get_latent_samples(start_r_BRX, start_Q_BRXX)
-        end_batch = self.get_latent_samples(end_r_BRX, end_Q2_BRXX)
+        lat_start_batch = self.get_latent_samples(start_r_BRX, start_Q_BRXX)
+        lat_start_r_BRX = lat_start_batch.pos.view(
+            n_paths, n_residues, 3
+        )
+        lat_start_Q_BRXX = lat_start_batch.node_orientations.view(
+            n_paths, n_residues, 3, 3
+        )
+        lat_end_batch = self.get_latent_samples(end_r_BRX, end_Q2_BRXX)
+        lat_end_r_BRX = lat_end_batch.pos.view(
+            n_paths, n_residues, 3
+        )
+        lat_end_Q_BRXX = lat_end_batch.node_orientations.view(
+            n_paths, n_residues, 3, 3
+        )
 
         # Path interpolation in latent space
         interp_level = torch.linspace(
-            0, 1, self.path_length, device=device
+            0, 1, self.path_length, device=self.device
         ) # so finding self.path_length - 2 new points
 
         # do linear interpolation for r
-        r_PBRX = torch.zeros(
+        lat_r_PBRX = torch.zeros(
             (self.path_length, start_r_BRX.shape[0], start_r_BRX.shape[1], 3),
         )
-        r_PBRX[0] = start_r_BRX
-        r_PBRX[-1] = end_r_BRX
+        lat_r_PBRX[0] = lat_start_r_BRX
+        lat_r_PBRX[-1] = lat_end_r_BRX
         for i in range(1, self.path_length - 1):
-            r_PBRX[i] = (1 - interp_level[i]) * start_r_BRX + interp_level[i] * end_r_BRX
+            lat_r_PBRX[i] = (1 - interp_level[i]) * lat_start_r_BRX + interp_level[i] * lat_end_r_BRX
 
         # do spherical interpolation for Q
-        Q_PBRXX = roma.rotmat_slerp(start_Q_BRXX, end_Q2_BRXX, interp_level)
+        lat_Q_PBRXX = torch.zeros(
+            (self.path_length, start_Q_BRXX.shape[0], start_Q_BRXX.shape[1], 3, 3),
+        )
+        lat_Q_PBRXX[0] = lat_start_Q_BRXX
+        lat_Q_PBRXX[-1] = lat_end_Q_BRXX
+        lat_Q_PBRXX = roma.rotmat_slerp(lat_start_Q_BRXX, lat_end_Q_BRXX, interp_level)
 
-        r_BPRX = r_PBRX.permute(1, 0, 2, 3)
-        Q_BPRXX = Q_PBRXX.permute(1, 0, 2, 3, 4)
+        lat_r_BPRX = lat_r_PBRX.permute(1, 0, 2, 3)
+        lat_Q_BPRXX = lat_Q_PBRXX.permute(1, 0, 2, 3, 4)
 
+        lat_r_BpRX = lat_r_BPRX.flatten(0, 1)
+        lat_Q_BpRXX = lat_Q_BPRXX.flatten(0, 1)
+
+        # decode to un-noised time
+        # note that this will be over individual points from each path in the batch
+        # we will have to reshape the results later
+        lat_batch_BpRX = Batch.from_data_list([
+            ChemGraph(
+                node_orientations=lat_Q_BpRXX[i],
+                pos=lat_r_BpRX[i],
+                edge_index=self.edge_set_2R2,
+                single_embeds=self.single_embeds_REs,
+                pair_embeds=self.pair_embeds_R2Ep,
+            )
+            for i in range(lat_r_BpRX.shape[0])
+        ]).to(self.device)
+
+        # we are denoising from t_lat to t_eps whereas N
+        # for this method was originally intended for t_max to t_eps
+        # rescale N accordingly
+        N = int(
+            Interpolator.BIOEMU_N_DEFAULT * 
+            (self.t_lat - Interpolator.BIOEMU_T_EPS) /
+            (Interpolator.BIOEMU_T_MAX - Interpolator.BIOEMU_T_EPS)
+        )
+
+        denoised_batch = dpm_solver(
+            sdes=self.sdes,
+            batch=lat_batch_BpRX,
+            N=N,
+            score_model=self.score_model,
+            max_t=self.t_lat,
+            eps_t=Interpolator.BIOEMU_T_EPS,
+            device=self.device,
+            max_is_start=True
+        )
+        denoised_BPRX = denoised_batch.pos.view(
+            n_paths, self.path_length, n_residues, 3
+        )
+        denoised_BPRXX = denoised_batch.node_orientations.view(
+            n_paths, self.path_length, n_residues, 3, 3
+        )
+        
         return {
             "final_path": None
         }

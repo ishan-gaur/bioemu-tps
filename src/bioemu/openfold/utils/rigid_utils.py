@@ -844,6 +844,12 @@ class Rigid:
             )
 
         if (rots.shape != trans.shape[:-1]) or (rots.device != trans.device):
+        # Above is the original code, but if rots is [*, 3, 3] and trans is [*, 3],
+        # then [*, 3, 3] != [*] and the code will fail, so I changed it to the below.
+        # the only issue is this code gets used a lot, so it should be right...
+        # so the rots is a Rotation object, not the actual rotation tensor
+        # accordingly, its shape is the dimensions before the 3x3 and the end
+        # if (rots.shape[:-1] != trans.shape) or (rots.device != trans.device):
             raise ValueError("Rots and trans incompatible")
 
         # Force full precision. Happens to the rotations automatically.
@@ -1366,3 +1372,26 @@ class Rigid:
             A version of the transformation on GPU
         """
         return Rigid(self._rots.cuda(), self._trans.cuda())
+    
+    def to(self, device: torch.device | None = None, dtype: torch.dtype | None = None) -> Rigid:
+        """
+        Moves the transformation object to a new device and/or dtype
+
+        Args:
+            device:
+                A torch device
+            dtype:
+                A torch dtype
+        Returns:
+            A copy of the transformation on the new device and/or dtype
+        """
+        return Rigid(
+            self._rots.to(
+                device=device if not None else self._rots.device,
+                dtype=dtype if not None else self._rots.dtype,
+            ),
+            self._trans.to(
+                device=device if device is not None else self._trans.device,
+                dtype=dtype if dtype is not None else self._trans.dtype
+            ),
+        )
