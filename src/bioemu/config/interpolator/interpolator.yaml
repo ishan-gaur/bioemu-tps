@@ -7,7 +7,7 @@ initial_guess_level: 0.25   # Initial guess level for interpolation
 
 lr: 0.2                     # Optimization learning rate (2e-1)
 om_steps: 100               # Number of optimization steps--actual was 2000
-path_batch_size: -1         # Turns off batch optimization – process the whole path
+path_batch_size: -1         # -1 Turns off batch optimization – process the whole path
 
 gamma: 10 # finally used to get zeta "gamma" set as samp_args.om_gamma * torch.tensor(masses).to(device) in the interpolator class
 D: 0.0 # finally reset as samp_args.om_d / (trainset.std if args.scale_data else 1.0) ** 2 in the interpolator class

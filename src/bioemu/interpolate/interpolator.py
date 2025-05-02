@@ -58,7 +58,8 @@ class Interpolator(torch.nn.Module):
         # Specify parameters for the optimizer
         lr=2e-1,
         om_steps=500,
-        path_batch_size=-1, # Turns off batch optimization--do the whole path
+        path_batch_size=-1, # -1 Turns off batch optimization--do the whole path
+        # if this is -1, the batch size for other bioemu calls will also be set to the path_length
 
         # These I can set the right defaults and forget
         action_cls=actions.TruncatedAction,
@@ -86,6 +87,12 @@ class Interpolator(torch.nn.Module):
     ):
         if protein_trajectory.c_alpha:
             raise NotImplementedError("C-alpha not implemented yet, BioEmu requires at least N-CA-C-CB-O")
+        if path_batch_size != -1:
+            self.bioemu_batch_size = path_batch_size
+            raise NotImplementedError("Batch optimization is not implemented yet.")
+        else:
+            self.bioemu_batch_size = path_length
+
         # the OMBasics codebase calls this gamma, but m * gamma is actually zeta
         super().__init__()
         self.device = device
@@ -424,27 +431,28 @@ class Interpolator(torch.nn.Module):
             )
 
 
-            denoised_batch = dpm_solver(
-                sdes=self.sdes,
-                batch=lat_batch_BRX,
-                N=N,
-                score_model=self.score_model,
-                max_t=self.t_lat,
-                eps_t=Interpolator.BIOEMU_T_EPS,
-                device=self.device,
-                max_is_start=True
-            )
+            with torch.no_grad():
+                denoised_batch = dpm_solver(
+                    sdes=self.sdes,
+                    batch=lat_batch_BRX,
+                    N=N,
+                    score_model=self.score_model,
+                    max_t=self.t_lat,
+                    eps_t=Interpolator.BIOEMU_T_EPS,
+                    device=self.device,
+                    max_is_start=True
+                )
             denoised_BRX = denoised_batch.pos.view(
                 n_paths, n_residues, 3
             )
             denoised_BRXX = denoised_batch.node_orientations.view(
                 n_paths, n_residues, 3, 3
             )
-            denoised_r_P.append(denoised_BRX)
-            denoised_Q_P.append(denoised_BRXX)
+            denoised_r_P.append(denoised_BRX.clone())
+            denoised_Q_P.append(denoised_BRXX.clone())
 
-        denoised_r_BPRX = torch.stack(denoised_r_P, dim=1)
-        denoised_Q_BPRX = torch.stack(denoised_Q_P, dim=1)
+        # denoised_r_BPRX = torch.stack(denoised_r_P, dim=1)
+        # denoised_Q_BPRX = torch.stack(denoised_Q_P, dim=1)
         
         return {
             "final_path": None
