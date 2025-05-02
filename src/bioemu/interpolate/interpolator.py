@@ -29,6 +29,9 @@ class Interpolator(torch.nn.Module):
     """
     Tensor Indices:
         B: Batch
+        Bp: Batch * Path
+        Bb: Bioemu Batch
+        P: Path
         R: Residue
         X: Spatial coordinates (3)
         Es: Embedding Dimension Single (384)
@@ -401,24 +404,26 @@ class Interpolator(torch.nn.Module):
         lat_r_BPRX = lat_r_PBRX.permute(1, 0, 2, 3)
         lat_Q_BPRXX = lat_Q_PBRXX.permute(1, 0, 2, 3, 4)
 
-        denoised_r_P = []
-        denoised_Q_P = []
-        for i in range(self.path_length):
-            lat_r_BRX = lat_r_BPRX[:, i]
-            lat_Q_BRXX = lat_Q_BPRXX[:, i]
+        denoised_r_Bb = []
+        denoised_Q_Bb = []
+        lat_r_BpRX = lat_r_BPRX.flatten(0, 1)
+        lat_Q_BpRXX = lat_Q_BPRXX.flatten(0, 1)
+        for i in range(0, lat_r_BpRX.shape[0], self.bioemu_batch_size):
+            lat_r_BbRX = lat_r_BpRX[i:i + self.bioemu_batch_size]
+            lat_Q_BbRXX = lat_Q_BpRXX[i:i + self.bioemu_batch_size]
 
             # decode to un-noised time
             # note that this will be over individual points from each path in the batch
             # we will have to reshape the results later
-            lat_batch_BRX = Batch.from_data_list([
+            lat_batch_BbRX = Batch.from_data_list([
                 ChemGraph(
-                    node_orientations=lat_Q_BRXX[i],
-                    pos=lat_r_BRX[i],
+                    node_orientations=lat_Q_BbRXX[j],
+                    pos=lat_r_BbRX[j],
                     edge_index=self.edge_set_2R2,
                     single_embeds=self.single_embeds_REs,
                     pair_embeds=self.pair_embeds_R2Ep,
                 )
-                for i in range(lat_r_BRX.shape[0])
+                for j in range(lat_r_BbRX.shape[0])
             ]).to(self.device)
 
             # we are denoising from t_lat to t_eps whereas N
@@ -434,7 +439,7 @@ class Interpolator(torch.nn.Module):
             with torch.no_grad():
                 denoised_batch = dpm_solver(
                     sdes=self.sdes,
-                    batch=lat_batch_BRX,
+                    batch=lat_batch_BbRX,
                     N=N,
                     score_model=self.score_model,
                     max_t=self.t_lat,
@@ -442,17 +447,21 @@ class Interpolator(torch.nn.Module):
                     device=self.device,
                     max_is_start=True
                 )
-            denoised_BRX = denoised_batch.pos.view(
-                n_paths, n_residues, 3
+            denoised_BbRX = denoised_batch.pos.view(
+                self.bioemu_batch_size, n_residues, 3
             )
-            denoised_BRXX = denoised_batch.node_orientations.view(
-                n_paths, n_residues, 3, 3
+            denoised_BbRXX = denoised_batch.node_orientations.view(
+                self.bioemu_batch_size, n_residues, 3, 3
             )
-            denoised_r_P.append(denoised_BRX.clone())
-            denoised_Q_P.append(denoised_BRXX.clone())
+            denoised_r_Bb.append(denoised_BbRX.clone())
+            denoised_Q_Bb.append(denoised_BbRXX.clone())
 
-        # denoised_r_BPRX = torch.stack(denoised_r_P, dim=1)
-        # denoised_Q_BPRX = torch.stack(denoised_Q_P, dim=1)
+        denoised_r_BPRX = torch.cat(denoised_r_Bb, dim=0).reshape(
+            n_paths, self.path_length, n_residues, 3
+        )
+        denoised_Q_BPRX = torch.cat(denoised_Q_Bb, dim=0).reshape(
+            n_paths, self.path_length, n_residues, 3, 3
+        )
         
         return {
             "final_path": None
