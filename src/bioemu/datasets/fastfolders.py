@@ -182,6 +182,7 @@ class FastFolderTrajectory:
         self.num_beads = self.topology.n_residues
         self.bead_onehot_RR = torch.eye(self.num_beads)
         self.masses_R = [sum([a.element.mass for a in r.atoms]) for r in self.topology.residues] # masses of the residues
+        self.masses_Ab = [a.element.mass for i, a in enumerate(self.topology.atoms) if self.backbone_mask_A[i]] # masses of the backbone atoms
 
 
 def to_angstrom(x):
