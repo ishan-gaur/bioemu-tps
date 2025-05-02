@@ -1,6 +1,7 @@
 import os
 import yaml
 import hydra
+from pathlib import Path
 
 import torch
 import numpy as np
@@ -68,6 +69,7 @@ class Interpolator(torch.nn.Module):
         action_cls=actions.TruncatedAction,
         optimizer=torch.optim.Adam,
         device="cuda" if torch.cuda.is_available() else "cpu",
+        output_path="/home/ishan/bioemu/interpolate/output",
 
         # These are parts of the interface I probably don't need to support, just shove them into kwargs
         # or raise if changed from these defaults
@@ -129,6 +131,7 @@ class Interpolator(torch.nn.Module):
         self.sequence = protein_trajectory.sequence
         self.topology = protein_trajectory.topology
         self.backbone_mask = protein_trajectory.backbone_mask_A
+        self.c_alpha_mask = protein_trajectory.c_alpha_mask_A
         self.backbone_atoms = [atom for atom in self.topology.atoms if atom.name in BACKBONE_ATOMS]
         self.atom_to_backbone_idx = {
             atom.index: i
@@ -146,6 +149,8 @@ class Interpolator(torch.nn.Module):
             ],
             dim=0,
         )
+        self.output_path = Path(output_path) / protein_trajectory.molecule.name
+        self.output_path.mkdir(parents=True, exist_ok=True) # check if can edit
 
     @classmethod
     def get_bioemu_models(cls, denoiser_type="dpm", denoiser_config_path=None):
@@ -462,7 +467,40 @@ class Interpolator(torch.nn.Module):
         denoised_Q_BPRX = torch.cat(denoised_Q_Bb, dim=0).reshape(
             n_paths, self.path_length, n_residues, 3, 3
         )
+
+        # Save PDBs from the 0th batch for a quick check
+        self.c_alpha_to_pdb(start_x_BAX[0][self.c_alpha_mask], self.output_path / "start.pdb")
+        self.c_alpha_to_pdb(end_x_BAX[0][self.c_alpha_mask], self.output_path / "end.pdb")
+        self.c_alpha_to_pdb(start_r_BRX[0], self.output_path / "start_frame.pdb")
+        self.c_alpha_to_pdb(end_r_BRX[0], self.output_path / "end_frame.pdb")
+        self.c_alpha_to_pdb(lat_r_BPRX[0][0], self.output_path / "lat_start.pdb")
+        self.c_alpha_to_pdb(lat_r_BPRX[0][-1], self.output_path / "lat_end.pdb")
+        for i in range(20, self.path_length, 20):
+            self.c_alpha_to_pdb(lat_r_BPRX[0, i, :, :], self.output_path / f"lat_{i}.pdb")
+        self.c_alpha_to_pdb(denoised_r_BPRX[0][0], self.output_path / "denoised_start.pdb")
+        self.c_alpha_to_pdb(denoised_r_BPRX[0][-1], self.output_path / "denoised_end.pdb")
+        for i in range(20, self.path_length, 20):
+            self.c_alpha_to_pdb(denoised_r_BPRX[0, i, :, :], self.output_path / f"denoised_{i}.pdb")
         
         return {
             "final_path": None
         }
+
+    def c_alpha_to_pdb(self, x_RX, output_path):
+        """
+        Write the C-alpha coordinates to a PDB file.
+        Args:
+            x_BRX: torch.Tensor of shape (num_paths, num_residues, 3)
+                Contains the coordinates of the C-alpha atoms
+            topology: Topology object
+            output_path: Path to save the PDB file
+        """
+        with open(output_path, "w") as f:
+            for i, residue in enumerate(self.topology.residues):
+                # get the CA atom
+                CA_idx = residue.atom("CA").index
+                # write the CA atom to the PDB file
+                f.write(f"ATOM  {i+1:5d}  CA  {residue.name:<3} {residue.index:4d}    {x_RX[i, 0]:8.3f}{x_RX[i, 1]:8.3f}{x_RX[i, 2]:8.3f}\n")
+            # write the end of the PDB file
+            f.write("END\n")
+        print(f"Wrote PDB file to {output_path}")
