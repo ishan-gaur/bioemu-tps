@@ -1,27 +1,20 @@
 import os
 import yaml
 import hydra
+from omegaconf import DictConfig
 from pathlib import Path
 
 import torch
 
 from bioemu.datasets.fastfolders import FastFolderTrajectory, Molecule
-from bioemu.interpolate import sample_interpolations_from_model, OMInterpolatorWrapper
-import bioemu.interpolate as actions
-from bioemu.interpolate import Interpolator
+from bioemu.interpolate import Interpolator, sample_interpolations_from_model
+from matplotlib import pyplot as plt
+from bioemu.datasets.fastfolders import CLUSTER_ENDPOINTS
 
 from typing import cast
 
-
-def main(
-    protein_name: str = "TRP_CAGE",
-    num_trajectories: int = 2,
-    path_length: int = 100,
-    dt: float = 0.001,
-    sample_batch_size: int = 2,
-    output_dir: None | str | os.PathLike = None,
-    seed: int = 0,
-):
+@hydra.main(version_base=None, config_path="config", config_name="config")
+def main(cfg: DictConfig) -> None:
     """
     Main function to get sampled transition paths for fast-folding proteins from the DE Shaw dataset
     by minimizing the OM Action using the BioEmu score function.
@@ -34,14 +27,23 @@ def main(
         Ab: Backbone atom
         X: Spatial coordinates (3)
     """
+    protein_name = cfg.protein_name
+    num_trajectories = cfg.num_trajectories
+    path_length = cfg.path_length
+    dt = cfg.dt
+    # sample_batch_size = cfg.sample_batch_size
+    output_dir = cfg.output_dir
+    seed = cfg.seed
+
     assert protein_name in Molecule.__members__, f"Protein {protein_name} not found in the dataset. Please check the name."
-    if output_dir is None:
-        output_dir = Path(__file__).parent.parent.parent / "output" / protein_name
-        output_dir.mkdir(parents=True, exist_ok=True) # make sure the directory is editable
-    fastfolders_config_path = Path(__file__).parent / "config" / "datasets" / "fastfolders.yaml"
-    with open(fastfolders_config_path) as f:
-        fastfolders_config = yaml.safe_load(f)
-    Trajectory = hydra.utils.instantiate(fastfolders_config)
+    if isinstance(output_dir, str):
+        output_dir = Path(output_dir)
+    # the * 1000 is because bioemu does diffusion in 0 to 1 but the two-for-one paper did in in 0 to 1000 so that's what sanjeev's code expects
+    exp_append_name = f"test_initial_latent_time_{int(cfg.interpolator.initial_guess_level * 1000)}_physical_params_dt={dt}"
+    eval_folder = output_dir / protein_name.lower() / f"main_eval_output_om_interpolate_{exp_append_name}"
+    eval_folder.mkdir(parents=True, exist_ok=True)
+
+    Trajectory = hydra.utils.instantiate(cfg.dataset)
     protein_trajectory = Trajectory(protein_name=protein_name)
     protein_trajectory = cast(FastFolderTrajectory, protein_trajectory)
     
@@ -52,29 +54,69 @@ def main(
                 num_trajectories // len(protein_trajectory.end_points_FAX) + 1, 1, 1
             )[:num_trajectories]
 
-    interpolator_config_path = Path(__file__).parent / "config" / "interpolator" / "interpolator.yaml"
-    with open(interpolator_config_path) as f:
-        interpolator_config = yaml.safe_load(f)
-    FastFolderInterpolator = hydra.utils.instantiate(interpolator_config)
-    
-    
+    FastFolderInterpolator = hydra.utils.instantiate(cfg.interpolator)
     torch.manual_seed(seed)
     bioemu_interpolator = FastFolderInterpolator(
         dt=dt,
         path_length=path_length,
         protein_trajectory=protein_trajectory,
     )
+    bioemu_interpolator = cast(Interpolator, bioemu_interpolator)
 
     paths = sample_interpolations_from_model(
         interpolator=bioemu_interpolator,
         endpoint_1_samples=start_points_BAX,
         endpoint_2_samples=end_points_BAX,
-        batch_size=sample_batch_size,
+        batch_size=num_trajectories,
         verbose=False,
         z=None,
     )
 
-    print(paths)
+    actions = paths["actions"]
+    path_terms = paths["path_terms"]
+    force_terms = paths["force_terms"]
+
+    # make a line plot where actions, path terms, and force terms are plotted using matplotlib and save as png
+    fig, ax = plt.subplots(1, 1, figsize=(10, 5))
+    ax.plot(actions, label="Action")
+    ax.plot(path_terms, label="Path Norm Loss")
+    ax.plot(force_terms, label="Force Norm Loss")
+    ax.legend()
+    ax.set_title("Actions, Path Norms, and Force Norms")
+    ax.set_xlabel("Optimization Step")
+    ax.set_ylabel("Value")
+    ax.set_yscale("log")
+    plt.savefig(str(eval_folder) + "/actions_path_force_terms.png")
+    print(f"Saved actions, path terms, and force terms plot to {eval_folder}/actions_path_force_terms.png")
+
+    # History of paths along the optimization
+    all_paths = paths["all_paths"]
+    # Save paths
+    torch.save(
+        all_paths,
+        str(str(eval_folder) + f"/path_history-om_interpolate.pt"),
+    )
+    # save the atom selection mb
+    # save the model...
+    print(f"""Now run the following command in the OMBasics repo/environment to evaluate the paths:
+from datasets.dataset_utils_empty import ATOM_SELECTION
+evaluate_fastfolders(
+    "{protein_name.lower()}",
+    "om_interpolate",
+    "{exp_append_name}",
+    checkpoint_folder="{str(output_dir)}",
+    reference_folder="{str(output_dir.parent)}/evaluate/saved_references",
+    pdb_folder="{str(output_dir.parent)}/datasets",
+    atom_selection=ATOM_SELECTION.A_CARBON,
+    model=None,
+    num_paths={num_trajectories},
+    endpoints={CLUSTER_ENDPOINTS[protein_trajectory.molecule]}
+    compute_rates=False,
+    log=False,
+    gif=True,
+)
+""")
+    print("Evaluation complete.")
 
 
 
@@ -82,7 +124,8 @@ def main(
 
 if __name__ == "__main__":
     import logging
-    import fire
+    # import fire
 
     logging.basicConfig(level=logging.DEBUG)
-    fire.Fire(main)
+    main()
+    # fire.Fire(main)

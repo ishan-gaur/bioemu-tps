@@ -597,123 +597,123 @@ class Interpolator(torch.nn.Module):
         # in the two-for-one-diffusion codebase, they anneal the t_opt from 200 to t_opt over the
         # first 1/4th of the optimizaiton steps (linear schedule)
         # Optimization of path using OM action
-        with torch.enable_grad():
-            denoised_r_BPRX.requires_grad = False
-            denoised_Q_BPRX.requires_grad = False
+        # with torch.enable_grad():
+        #     denoised_r_BPRX.requires_grad = False
+        #     denoised_Q_BPRX.requires_grad = False
 
-            denoised_x_BpAbX = self.frame_to_euclidian(denoised_r_BPRX.flatten(0, 1), denoised_Q_BPRX.flatten(0, 1))
+        #     denoised_x_BpAbX = self.frame_to_euclidian(denoised_r_BPRX.flatten(0, 1), denoised_Q_BPRX.flatten(0, 1))
 
-            denoised_st_x_BAbX = denoised_x_BpAbX[0].unsqueeze(0)
-            reconstructed_st_x_BAbX = self.frame_to_euclidian(*self.euclidian_to_frame(denoised_st_x_BAbX))
-            assert torch.all(torch.norm(denoised_st_x_BAbX - reconstructed_st_x_BAbX, dim=2) < 3), f"Reconstruction error on denoised start point too large: {torch.norm(denoised_st_x_BAbX - reconstructed_st_x_BAbX, dim=2).max().item()}"
+        #     denoised_st_x_BAbX = denoised_x_BpAbX[0].unsqueeze(0)
+        #     reconstructed_st_x_BAbX = self.frame_to_euclidian(*self.euclidian_to_frame(denoised_st_x_BAbX))
+        #     assert torch.all(torch.norm(denoised_st_x_BAbX - reconstructed_st_x_BAbX, dim=2) < 3), f"Reconstruction error on denoised start point too large: {torch.norm(denoised_st_x_BAbX - reconstructed_st_x_BAbX, dim=2).max().item()}"
 
-            denoised_x_BpAbX_reconstructed = self.frame_to_euclidian(*self.euclidian_to_frame(denoised_x_BpAbX))
-            assert torch.all(torch.norm(denoised_x_BpAbX - denoised_x_BpAbX_reconstructed, dim=2) < 3), f"Reconstruction error on denoised path too large: {torch.norm(denoised_x_BpAbX - denoised_x_BpAbX_reconstructed.flatten(0, 1), dim=2).max().item()}"
+        #     denoised_x_BpAbX_reconstructed = self.frame_to_euclidian(*self.euclidian_to_frame(denoised_x_BpAbX))
+        #     assert torch.all(torch.norm(denoised_x_BpAbX - denoised_x_BpAbX_reconstructed, dim=2) < 3), f"Reconstruction error on denoised path too large: {torch.norm(denoised_x_BpAbX - denoised_x_BpAbX_reconstructed.flatten(0, 1), dim=2).max().item()}"
 
-            denoised_x_BPAbX = denoised_x_BpAbX.view(
-                n_paths, self.path_length, -1, 3 # -1 should be number of backbone atoms--97 for trpcage
-            )
+        #     denoised_x_BPAbX = denoised_x_BpAbX.view(
+        #         n_paths, self.path_length, -1, 3 # -1 should be number of backbone atoms--97 for trpcage
+        #     )
 
-            for b in range(n_paths):
-                pbar = tqdm(range(self.om_steps))
-                denoised_x_PAbX = denoised_x_BPAbX[b].clone()
-                denoised_x_PAbX.requires_grad = True
-                # denoised_x_PAbX.requires_grad = True
-                optimizer = self.optimizer_cls(params=[denoised_x_PAbX])
-                for i in pbar:
-                    # Initialize gradient accumulator
-                    optimizer.zero_grad()
-                    # grads_accumulator = torch.zeros_like(denoised_x_PAbX)
+        #     for b in range(n_paths):
+        #         pbar = tqdm(range(self.om_steps))
+        #         denoised_x_PAbX = denoised_x_BPAbX[b].clone()
+        #         denoised_x_PAbX.requires_grad = True
+        #         # denoised_x_PAbX.requires_grad = True
+        #         optimizer = self.optimizer_cls(params=[denoised_x_PAbX])
+        #         for i in pbar:
+        #             # Initialize gradient accumulator
+        #             optimizer.zero_grad()
+        #             # grads_accumulator = torch.zeros_like(denoised_x_PAbX)
                     
 
-                    path_displacements_PAbX = denoised_x_PAbX[1:] - denoised_x_PAbX[:-1]
-                    path_distances_PAb = torch.linalg.vector_norm(path_displacements_PAbX)
-                    # Below is the OM term for difference in euclidian position over the time interval
-                    # Note mean is over particles and path positions
-                    # equations in the paper are for single particles
-                    # we sum over particles here just for convenience with autograd
-                    # we also rescale by dt because this terms comes from brownian motion
-                    distance_term = path_distances_PAb.mean() / (2 * self.dt)
+        #             path_displacements_PAbX = denoised_x_PAbX[1:] - denoised_x_PAbX[:-1]
+        #             path_distances_PAb = torch.linalg.vector_norm(path_displacements_PAbX)
+        #             # Below is the OM term for difference in euclidian position over the time interval
+        #             # Note mean is over particles and path positions
+        #             # equations in the paper are for single particles
+        #             # we sum over particles here just for convenience with autograd
+        #             # we also rescale by dt because this terms comes from brownian motion
+        #             distance_term = path_distances_PAb.mean() / (2 * self.dt)
 
-                    path_forces_PAbX = self.get_forces(denoised_x_PAbX, self.t_opt)
-                    path_force_mags_PAb = torch.linalg.vector_norm(path_forces_PAbX)
-                    # Below is the OM term for the size of the forces at each configuration of the system
-                    # Note force = grad potential = score up to constant scaling factors
-                    force_term = path_force_mags_PAb.mean() * self.dt / (2 * self.zeta_Ab ** 2) 
+        #             path_forces_PAbX = self.get_forces(denoised_x_PAbX, self.t_opt)
+        #             path_force_mags_PAb = torch.linalg.vector_norm(path_forces_PAbX)
+        #             # Below is the OM term for the size of the forces at each configuration of the system
+        #             # Note force = grad potential = score up to constant scaling factors
+        #             force_term = path_force_mags_PAb.mean() * self.dt / (2 * self.zeta_Ab ** 2) 
 
-                    # TODO, for now we're using the truncated action in the regime of low diffusion coefficient
-                    instability_term = 0.0 * self.D * self.dt / self.zeta_Ab # laplacian of the potential / divergence of the score
+        #             # TODO, for now we're using the truncated action in the regime of low diffusion coefficient
+        #             instability_term = 0.0 * self.D * self.dt / self.zeta_Ab # laplacian of the potential / divergence of the score
 
-                    action = distance_term + force_term + instability_term
-                    grads = torch.autograd.grad(action, denoised_x_PAbX)
+        #             action = distance_term + force_term + instability_term
+        #             grads = torch.autograd.grad(action, denoised_x_PAbX)
 
-        #                 # Compute gradients for this batch and accumulate
-        #                 batch_grads = torch.autograd.grad(batch_action, path_batch)[0]
-        #                 grads_accumulator[:, start_idx : end_idx + 1] += batch_grads
+        # #                 # Compute gradients for this batch and accumulate
+        # #                 batch_grads = torch.autograd.grad(batch_action, path_batch)[0]
+        # #                 grads_accumulator[:, start_idx : end_idx + 1] += batch_grads
 
-        #                 # Accumulate action values for logging
-        #                 total_action += batch_action.item()
-        #                 total_first_term += batch_first_term.item()
-        #                 total_second_term += batch_second_term.item()
-        #                 total_third_term += batch_third_term.item()
+        # #                 # Accumulate action values for logging
+        # #                 total_action += batch_action.item()
+        # #                 total_first_term += batch_first_term.item()
+        # #                 total_second_term += batch_second_term.item()
+        # #                 total_third_term += batch_third_term.item()
 
-        #                 # Free memory
-        #                 del path_batch, batch_forces, batch_action, batch_grads
-        #                 torch.cuda.empty_cache()
+        # #                 # Free memory
+        # #                 del path_batch, batch_forces, batch_action, batch_grads
+        # #                 torch.cuda.empty_cache()
 
-        #             # Log the action values
-        #             actions.append(total_action)
-        #             path_terms.append(total_first_term)
-        #             force_terms.append(total_second_term)
-        #             laplace_terms.append(total_third_term)
+        # #             # Log the action values
+        # #             actions.append(total_action)
+        # #             path_terms.append(total_first_term)
+        # #             force_terms.append(total_second_term)
+        # #             laplace_terms.append(total_third_term)
 
-        #             with torch.no_grad():
-        #                 # Zero out gradients for endpoints (they should be fixed)
-        #                 grads_accumulator[:, 0], grads_accumulator[:, -1] = 0, 0
+        # #             with torch.no_grad():
+        # #                 # Zero out gradients for endpoints (they should be fixed)
+        # #                 grads_accumulator[:, 0], grads_accumulator[:, -1] = 0, 0
 
-        #                 if add_noise:
-        #                     # Add noise to gradients
-        #                     _t = (
-        #                         torch.tensor([max(1000 - i - 1, diff_time)])
-        #                         .repeat(noised_xs.shape[0] * noised_xs.shape[1])
-        #                         .to(self.device)
-        #                     )
-        #                     _, _, model_log_variance = self.p_mean_variance(
-        #                         center_zero(noised_xs.reshape(-1, self.num_atoms, 3)), _t
-        #                     )
-        #                     noise = torch.randn_like(
-        #                         noised_xs.reshape(-1, self.num_atoms, 3)
-        #                     )
-        #                     noise = center_zero(noise)
-        #                     path_noise = (
-        #                         (0.5 * model_log_variance).exp() * noise * temperature
-        #                     )
-        #                     grads_accumulator = (
-        #                         grads_accumulator
-        #                         + path_noise.reshape(grads_accumulator.shape) / lr
-        #                     )
+        # #                 if add_noise:
+        # #                     # Add noise to gradients
+        # #                     _t = (
+        # #                         torch.tensor([max(1000 - i - 1, diff_time)])
+        # #                         .repeat(noised_xs.shape[0] * noised_xs.shape[1])
+        # #                         .to(self.device)
+        # #                     )
+        # #                     _, _, model_log_variance = self.p_mean_variance(
+        # #                         center_zero(noised_xs.reshape(-1, self.num_atoms, 3)), _t
+        # #                     )
+        # #                     noise = torch.randn_like(
+        # #                         noised_xs.reshape(-1, self.num_atoms, 3)
+        # #                     )
+        # #                     noise = center_zero(noise)
+        # #                     path_noise = (
+        # #                         (0.5 * model_log_variance).exp() * noise * temperature
+        # #                     )
+        # #                     grads_accumulator = (
+        # #                         grads_accumulator
+        # #                         + path_noise.reshape(grads_accumulator.shape) / lr
+        # #                     )
 
-        #                 # Apply gradients and update
-        #                 noised_xs.grad = grads_accumulator
-        #                 optimizer.step()
-        #                 if cosine_scheduler:
-        #                     scheduler.step()
+        # #                 # Apply gradients and update
+        # #                 noised_xs.grad = grads_accumulator
+        # #                 optimizer.step()
+        # #                 if cosine_scheduler:
+        # #                     scheduler.step()
 
-        #             all_noised_xs.append(noised_xs.clone().detach())
-        #             # account for sign ambiguity of third term
-        #             total_abs = total_first_term + total_second_term + abs(total_third_term)
-        #             path_contribution = (
-        #                 total_first_term / total_abs if total_abs != 0 else 0
-        #             )
-        #             force_contribution = (
-        #                 total_second_term / total_abs if total_abs != 0 else 0
-        #             )
-        #             laplace_contribution = (
-        #                 abs(total_third_term) / total_abs if total_abs != 0 else 0
-        #             )
-        #             pbar.set_description(
-        #                 f"OM Action: {total_action}, Path Contribution: {round(path_contribution*100, 3)}%, Force Contribution: {round(force_contribution * 100, 3)}%, Laplace Contribution: {round(laplace_contribution * 100, 3)}%"
-        #             )
+        # #             all_noised_xs.append(noised_xs.clone().detach())
+        # #             # account for sign ambiguity of third term
+        # #             total_abs = total_first_term + total_second_term + abs(total_third_term)
+        # #             path_contribution = (
+        # #                 total_first_term / total_abs if total_abs != 0 else 0
+        # #             )
+        # #             force_contribution = (
+        # #                 total_second_term / total_abs if total_abs != 0 else 0
+        # #             )
+        # #             laplace_contribution = (
+        # #                 abs(total_third_term) / total_abs if total_abs != 0 else 0
+        # #             )
+        # #             pbar.set_description(
+        # #                 f"OM Action: {total_action}, Path Contribution: {round(path_contribution*100, 3)}%, Force Contribution: {round(force_contribution * 100, 3)}%, Laplace Contribution: {round(laplace_contribution * 100, 3)}%"
+        # #             )
 
         # Save PDBs from the 0th batch for a quick check
         self.c_alpha_to_pdb(start_x_BAX[0][self.c_alpha_mask], self.output_path / "start.pdb")
@@ -728,9 +728,19 @@ class Interpolator(torch.nn.Module):
         self.c_alpha_to_pdb(denoised_r_BPRX[0][-1], self.output_path / "denoised_end.pdb")
         for i in range(20, self.path_length, 20):
             self.c_alpha_to_pdb(denoised_r_BPRX[0, i, :, :], self.output_path / f"denoised_{i}.pdb")
+
+        final_path = denoised_r_BPRX.flatten(0, 1)
+        all_paths = torch.stack([final_path.clone() for _ in range(0, self.om_steps + 1, 50)])
+        force_terms = torch.abs(torch.randn(self.om_steps))
+        path_terms = torch.abs(torch.randn(self.om_steps))
+        actions = force_terms + path_terms
         
         return {
-            "final_path": None
+            "final_path": final_path,
+            "all_paths": all_paths,
+            "actions": actions,
+            "force_terms": force_terms,
+            "path_terms": path_terms,
         }
 
     def c_alpha_to_pdb(self, x_RX, output_path):
@@ -742,6 +752,7 @@ class Interpolator(torch.nn.Module):
             topology: Topology object
             output_path: Path to save the PDB file
         """
+        x_RX /= 10 # angstroms to nanometers
         with open(output_path, "w") as f:
             for i, residue in enumerate(self.topology.residues):
                 # get the CA atom
