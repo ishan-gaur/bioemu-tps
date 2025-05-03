@@ -81,6 +81,16 @@ def rot_vec_mul(r: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         [*, 3] rotated coordinates
     """
     x, y, z = torch.unbind(t, dim=-1)
+    # def mul(r, x):
+    #     while r.ndim < x.ndim:
+    #         r = r.unsqueeze(-1)
+    #     return r * x
+    # return torch.stack([
+    #     mul(r[..., 0, 0], x) + mul(r[..., 0, 1], y) + mul(r[..., 0, 2], z),
+    #     mul(r[..., 1, 0], x) + mul(r[..., 1, 1], y) + mul(r[..., 1, 2], z),
+    #     mul(r[..., 2, 0], x) + mul(r[..., 2, 1], y) + mul(r[..., 2, 2], z),
+    #     ],
+    #     dim=-1)
     return torch.stack(
         [
             r[..., 0, 0] * x + r[..., 0, 1] * y + r[..., 0, 2] * z,
