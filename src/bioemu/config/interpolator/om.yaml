@@ -5,11 +5,15 @@ _partial_: true
 latent_time: 0.01           # BioEmu ranges typically over some range near 0.01.
 initial_guess_level: 0.25   # Initial guess level for interpolation
 
-om_steps: 20               # Number of optimization steps--actual was 2000
+om_steps: 200               # Number of optimization steps--actual was 2000
 path_batch_size: -1         # -1 Turns off batch optimization – process the whole path
 
 gamma: 10 # finally used to get zeta "gamma" set as samp_args.om_gamma * torch.tensor(masses).to(device) in the interpolator class
 D: 0.0 # finally reset as samp_args.om_d / (trainset.std if args.scale_data else 1.0) ** 2 in the interpolator class
+force_scale: 9000 # fudge factor but conceptualizing as normalizing between the time scales of the two diffusion processes, 0-1 -> 0-1000
+# That's why the force term is multiplied by its square
+# jk, was too small so increasing it maybe this accounts for the extra mass from all the backbone atoms??? no that should be the same
+# since it's a per term constant and we take their mean
 
 optimizer:
   _target_: torch.optim.Adam

@@ -96,10 +96,15 @@ def main(cfg: DictConfig) -> None:
         all_paths,
         str(str(eval_folder) + f"/path_history-bioemu_interpolate.pt"),
     )
+    torch.save(
+        paths["sampled_mol"],
+        str(str(eval_folder) + f"/sample-bioemu_interpolate.pt"),
+    )
     # save the atom selection mb
     # save the model...
     print(f"""Now run the following command in the OMBasics repo/environment to evaluate the paths:
-from datasets.dataset_utils_empty import ATOM_SELECTION
+from datasets.dataset_utils_empty import AtomSelection
+from evaluate.evaluate_fastfolders import evaluate_fastfolders
 evaluate_fastfolders(
     "{protein_name.lower()}",
     "bioemu_interpolate",
@@ -107,7 +112,7 @@ evaluate_fastfolders(
     checkpoint_folder="{str(output_dir)}",
     reference_folder="{str(output_dir.parent)}/evaluate/saved_references",
     pdb_folder="{str(output_dir.parent)}/datasets",
-    atom_selection=ATOM_SELECTION.A_CARBON,
+    atom_selection=AtomSelection.A_CARBON,
     model=None,
     num_paths={num_trajectories},
     endpoints={CLUSTER_ENDPOINTS[protein_trajectory.molecule]},

@@ -62,13 +62,14 @@ class Interpolator(torch.nn.Module):
         gamma=10, # in the actual script I am stepping through, this is a tensor with value 12.0108, shape (n_paths,)
         # set as samp_args.om_gamma * torch.tensor(masses).to(device)
         D=0.015, # set as samp_args.om_d / (trainset.std if args.scale_data else 1.0) ** 2
+        force_scale=1.0, # fudge factor to reweight forces
         # Specify parameters for the interpolator
         latent_time=0.01, # BioEmu ranges from 0.990 to 0.001 or smthg
         initial_guess_level=0.25, # BioEmu ranges from 0.990 to 0.001 or smthg
         # Specify parameters for the optimizer
         lr=2e-1,
         om_steps=500,
-        path_opt_log_step=10, # log paths every 50 steps
+        path_opt_log_step=50, # log paths every 50 steps
         path_batch_size=-1, # -1 Turns off batch optimization--do the whole path
         # if this is -1, the batch size for other bioemu calls will also be set to the path_length
 
@@ -122,6 +123,7 @@ class Interpolator(torch.nn.Module):
 
         self.zeta_Ab = gamma * torch.tensor(protein_trajectory.masses_Ab).to(self.device)
         self.D = D / protein_trajectory.std ** 2
+        self.force_scale = force_scale
         # self.action = action_cls(dt=self.dt, xi=(1 / self.gamma))
 
         self.score_model, self.sdes, self.denoiser = self.get_bioemu_models()
@@ -359,6 +361,8 @@ class Interpolator(torch.nn.Module):
         return r_BRX, Q_BRXX
 
     def backbone_euclidian_to_frame(self, x_BAbX):
+        if x_BAbX.ndim == 2:
+            x_BAbX = x_BAbX[None, :, :]
         r_list_R, Q_list_R = [], []
         residue_ptr = 0
         for residue in self.topology.residues:
@@ -726,7 +730,7 @@ class Interpolator(torch.nn.Module):
                     path_force_mags_PAb = torch.linalg.vector_norm(path_forces_PAbX, dim=2)
                     # Below is the OM term for the size of the forces at each configuration of the system
                     # Note force = grad potential = score up to constant scaling factors
-                    force_term = (path_force_mags_PAb * self.dt / (2 * self.zeta_Ab.unsqueeze(0) ** 2)).mean()
+                    force_term = (path_force_mags_PAb * self.dt * (self.force_scale ** 2) / (2 * self.zeta_Ab.unsqueeze(0) ** 2)).mean()
 
                     # TODO, for now we're using the truncated action in the regime of low diffusion coefficient
                     instability_term = (0.0 * self.D * self.dt / self.zeta_Ab).mean() # laplacian of the potential / divergence of the score
@@ -798,7 +802,7 @@ class Interpolator(torch.nn.Module):
         all_path_xs_OBPAbX = torch.stack(all_path_xs_B, dim=0).permute(1, 0, 2, 3, 4)
         # decode the optimized paths (keeping every 50 for future visualization)
         all_path_xs_OBPAbX = torch.concat([all_path_xs_OBPAbX[::self.path_opt_log_step], all_path_xs_OBPAbX[-1:]], dim=0)
-        n_opt_log_steps = all_path_xs_OBPAbX.shape[0]
+        # n_opt_log_steps = all_path_xs_OBPAbX.shape[0]
         # Reset the start/end points--shouldn't need this since we set the grads to 0
         # all_path_xs_OBPAbX[:, :, 0] = torch.tile(start_x_BAbX[None, ...], (n_opt_log_steps, 1, 1, 1))
         # all_path_xs_OBPAbX[:, :, -1] = torch.tile(end_x_BAbX[None, ...], (n_opt_log_steps, 1, 1, 1))
@@ -812,11 +816,16 @@ class Interpolator(torch.nn.Module):
 
         for i in range(len(all_path_xs_OBPAbX)):
             for j in list(range(0, self.path_length, 20)) + [self.path_length - 1]:
-                self.c_alpha_to_pdb(all_path_xs_OBPAbX[i, 0, j], self.output_path / f"denoised_{j}_step_{i * self.path_opt_log_step}.pdb")
+                sample_RX = self.backbone_euclidian_to_frame(all_path_xs_OBPAbX[i, 0, j])[0][0] # first 0 is to get the r tensor, second is to select the batch index
+                self.c_alpha_to_pdb(sample_RX, self.output_path / f"denoised_{j}_step_{i * self.path_opt_log_step}.pdb")
 
-        final_path = all_path_xs_OBPAbX[-1].flatten(0, 1)
         n_atoms = start_x_BAbX.shape[1]
-        all_paths = all_path_xs_OBPAbX.reshape(all_path_xs_OBPAbX.shape[0], -1, n_atoms, 3)
+        all_path_xs_OBPRX = self.backbone_euclidian_to_frame(all_path_xs_OBPAbX.flatten(0, 2))[0].reshape(
+            all_path_xs_OBPAbX.shape[0], all_path_xs_OBPAbX.shape[1], all_path_xs_OBPAbX.shape[2], -1, 3
+        )
+        final_path = all_path_xs_OBPRX[-1].flatten(0, 1)
+        n_backbone = all_path_xs_OBPRX.shape[-2]
+        all_paths = all_path_xs_OBPRX.reshape(all_path_xs_OBPRX.shape[0], -1, n_backbone, 3)
         actions = torch.tensor(actions).sum(dim=0)
         path_terms = torch.tensor(path_terms).sum(dim=0)
         force_terms = torch.tensor(force_terms).sum(dim=0)
