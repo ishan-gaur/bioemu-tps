@@ -40,7 +40,7 @@ def main(cfg: DictConfig) -> None:
         output_dir = Path(output_dir)
     # the * 1000 is because bioemu does diffusion in 0 to 1 but the two-for-one paper did in in 0 to 1000 so that's what sanjeev's code expects
     exp_append_name = f"test_initial_latent_time_{int(cfg.interpolator.initial_guess_level * 1000)}_physical_params_dt={dt}"
-    eval_folder = output_dir / protein_name.lower() / f"main_eval_output_om_interpolate_{exp_append_name}"
+    eval_folder = output_dir / protein_name.lower() / f"main_eval_output_bioemu_interpolate_{exp_append_name}"
     eval_folder.mkdir(parents=True, exist_ok=True)
 
     Trajectory = hydra.utils.instantiate(cfg.dataset)
@@ -94,7 +94,7 @@ def main(cfg: DictConfig) -> None:
     # Save paths
     torch.save(
         all_paths,
-        str(str(eval_folder) + f"/path_history-om_interpolate.pt"),
+        str(str(eval_folder) + f"/path_history-bioemu_interpolate.pt"),
     )
     # save the atom selection mb
     # save the model...
@@ -102,7 +102,7 @@ def main(cfg: DictConfig) -> None:
 from datasets.dataset_utils_empty import ATOM_SELECTION
 evaluate_fastfolders(
     "{protein_name.lower()}",
-    "om_interpolate",
+    "bioemu_interpolate",
     "{exp_append_name}",
     checkpoint_folder="{str(output_dir)}",
     reference_folder="{str(output_dir.parent)}/evaluate/saved_references",
@@ -110,7 +110,7 @@ evaluate_fastfolders(
     atom_selection=ATOM_SELECTION.A_CARBON,
     model=None,
     num_paths={num_trajectories},
-    endpoints={CLUSTER_ENDPOINTS[protein_trajectory.molecule]}
+    endpoints={CLUSTER_ENDPOINTS[protein_trajectory.molecule]},
     compute_rates=False,
     log=False,
     gif=True,

@@ -14,6 +14,7 @@ from bioemu.datasets.fastfolders import FastFolderTrajectory, BACKBONE_ATOMS
 from bioemu.models import DiGConditionalScoreModel
 from bioemu.denoiser import _get_score, dpm_solver
 from bioemu.sde_lib import SDE
+from bioemu.so3_sde import rotvec_to_rotmat
 from bioemu.interpolate import actions
 from bioemu.interpolate.om_lib import center_zero, assert_center_zero
 from bioemu.sample import maybe_download_checkpoint, SUPPORTED_DENOISERS, DEFAULT_DENOISER_CONFIG_DIR
@@ -36,6 +37,7 @@ class Interpolator(torch.nn.Module):
         P: Path
         R: Residue
         X: Spatial coordinates (3)
+        O: OM optimization step
         Es: Embedding Dimension Single (384)
         Ep: Embedding Dimension Pair (128)
     """
@@ -264,6 +266,26 @@ class Interpolator(torch.nn.Module):
 
         return frames_RAfX, frame_mask_RAf
 
+    def all_atom_to_backbone(self, x_BAX):
+        """
+        Convert all atom coordinates to backbone coordinates.
+        Args:
+            x_BAX: torch.Tensor of shape (n_paths, n_atoms, 3)
+                Contains the coordinates of the atoms
+        Returns:
+            x_BAbX: torch.Tensor of shape (n_paths, n_backbone_atoms, 3)
+                Contains the coordinates of the backbone atoms
+        """
+        assert x_BAX.shape[1] == len(list(self.topology.atoms)), f"Number of atoms in x_BAX ({x_BAX.shape[1]}) does not match number of atoms in topology ({len(self.topology.atoms)})"
+        assert x_BAX.shape[2] == 3, f"x_BAX should have shape (n_paths, n_atoms, 3), but has shape {x_BAX.shape}"
+
+        # iterate through the atoms of the protein
+        n_backbone = len(self.atom_to_backbone_idx)
+        x_BAbX = torch.zeros((x_BAX.shape[0], n_backbone, 3), device=self.device)
+        for i, idx in enumerate(self.atom_to_backbone_idx):
+            x_BAbX[:, i, :] = x_BAX[:, idx, :]
+        return x_BAbX
+
     def all_atom_euclidian_to_frame(self, x_BAX):
         # Rigid.from_3_points implements the gram-schmidt algorithm to get the frame representation in alphafold2
         # See AlphaFold supplement for details: https://static-content.springer.com/esm/art%3A10.1038%2Fs41586-021-03819-2/MediaObjects/41586_2021_3819_MOESM1_ESM.pdf#page=26.15
@@ -334,7 +356,7 @@ class Interpolator(torch.nn.Module):
             
         return r_BRX, Q_BRXX
 
-    def euclidian_to_frame(self, x_BAbX):
+    def backbone_euclidian_to_frame(self, x_BAbX):
         r_list_R, Q_list_R = [], []
         residue_ptr = 0
         for residue in self.topology.residues:
@@ -387,7 +409,7 @@ class Interpolator(torch.nn.Module):
             
         return r_BRX, Q_BRXX
 
-    def frame_to_euclidian(self, r_BRX, Q_BRXX):
+    def frame_to_euclidian_backbone(self, r_BRX, Q_BRXX):
         # iterate through the atoms of the protein
         n_backbone = len(self.atom_to_backbone_idx) # only has entries for backbone atoms
         r_BRX, Q_BRXX = r_BRX.to(self.device), Q_BRXX.to(self.device)
@@ -418,6 +440,10 @@ class Interpolator(torch.nn.Module):
             assert backbone_indices[0] == self.atom_to_backbone_idx[residue.atom("N").index], f"Backbone indices {backbone_indices} do not start with N"
             assert backbone_indices[1] == self.atom_to_backbone_idx[residue.atom("CA").index], f"Backbone indices {backbone_indices} do not have CA as the second atom"
             assert backbone_indices[2] == self.atom_to_backbone_idx[residue.atom("C").index], f"Backbone indices {backbone_indices} do not have C as the third atom"
+            assert len(backbone_indices) > 4 or backbone_indices[3] == self.atom_to_backbone_idx[residue.atom("O").index], f"Backbone indices {backbone_indices} do not have O as the fourth atom, when only 4 atoms"
+            assert len(backbone_indices) != 5 or backbone_indices[3] == self.atom_to_backbone_idx[residue.atom("CB").index], f"Backbone indices {backbone_indices} do not have CB as the fourth atom, when there are 5 atoms"
+            assert len(backbone_indices) != 5 or backbone_indices[4] == self.atom_to_backbone_idx[residue.atom("O").index], f"Backbone indices {backbone_indices} do not have O as the fifth atom, when there are 5 atoms"
+            assert len(backbone_indices) > 3 and len(backbone_indices) < 6, f"Backbone indices {backbone_indices} do not have 4 or 5 atoms"
 
         # check that all the atoms were set in the right order
         backbone_atom_elements = [a.name for residue_atoms in self.backbone_atoms_RAf for a in residue_atoms]
@@ -425,7 +451,7 @@ class Interpolator(torch.nn.Module):
             assert atom == backbone_atom_elements[i], f"Atom {atom} at index {i} does not match expected atom {self.backbone_atoms_RAf[i].name}"
 
         assert atoms_set == n_backbone, f"Not all atoms were set, only {atoms_set} out of {n_backbone}"
-        assert torch.all(torch.norm(self.euclidian_to_frame(x_BAbX)[0] - r_BRX, dim=2) < 4), f"Reconstruction error too large: {torch.norm(self.euclidian_to_frame(x_BAbX)[0] - r_BRX, dim=2).max().item()}"
+        assert torch.all(torch.norm(self.backbone_euclidian_to_frame(x_BAbX)[0] - r_BRX, dim=2) < 4), f"Reconstruction error too large: {torch.norm(self.backbone_euclidian_to_frame(x_BAbX)[0] - r_BRX, dim=2).max().item()}"
         return x_BAbX
     
     def get_latent_samples(self, r_BRX, Q_BRXX):
@@ -454,7 +480,7 @@ class Interpolator(torch.nn.Module):
         return batch
 
     def get_forces(self, x_BAbX, t):
-        r_BRX, Q_BRXX = self.euclidian_to_frame(x_BAbX)
+        r_BRX, Q_BRXX = self.backbone_euclidian_to_frame(x_BAbX)
         assert x_BAbX.shape[1] == torch.sum(self.frame_mask_RAf).item(), f"Number of atoms in x_BAbX ({x_BAbX.shape[1]}) does not match number of atoms in frames_RAfX ({torch.sum(self.frame_mask_RAf).item()})"
 
         batch = Batch.from_data_list([
@@ -467,18 +493,35 @@ class Interpolator(torch.nn.Module):
             )
             for i in range(x_BAbX.shape[0])
         ]).to(self.device)
+        if not isinstance(t, torch.Tensor):
+            t = torch.full((x_BAbX.shape[0],), t, device=self.device)
         score = _get_score(batch=batch, t=t, score_model=self.score_model, sdes=self.sdes)
-        score_r_BRX = score["pos"]
-        score_Q_BRXX = score["node_orientations"]
+        score_r_BrX = score["pos"] # Br is batch * residue, which in this case is n_points * n_residues
+        score_r_BRX = score_r_BrX.view(*r_BRX.shape)
+        score_Q_BrX = score["node_orientations"] # if you look at the Euler-Maruyama integrator for this, it looks like this is a rotation vector
+        score_Q_BrXX = rotvec_to_rotmat(score_Q_BrX)
+        score_Q_BRXX = score_Q_BrXX.view(*Q_BRXX.shape)
 
         n_frame_atoms = self.F_RAfX.shape[1]
         A_1Af = torch.zeros((1, n_frame_atoms), device=self.device)
-        A_1Af[1] = 1.0 # this is the entry corresponding to the CA atom in X, or the translation r in the frame representation
+        A_1Af[0, 1] = 1.0 # this is the entry corresponding to the CA atom in X, or the translation r in the frame representation
         B_AfAf = torch.eye(n_frame_atoms, device=self.device) - torch.ones_like(A_1Af).T @ A_1Af
-        F_psinv_RXAf = torch.inverse(self.F_RAfX.T @ self.F_RAfX) @ self.F_RAfX.T
+        # F_RXAf = self.F_RAfX.permute(0, 2, 1)
+        # F_psinv_RXAf = torch.inverse(F_RXAf @ self.F_RAfX) @ F_RXAf
+        F_pinv_RXAf = torch.linalg.pinv(self.F_RAfX)
 
-        score_x_BAfX = A_1Af.T @ score_r_BRX + (F_psinv_RXAf @ B_AfAf).T @ score_Q_BRXX
-        return score_x_BAfX
+        score_x_r_comp_BRAfX = torch.einsum("brx, a -> brax", score_r_BRX, A_1Af.squeeze())
+        # score_x_Q_comp_BRAfX, residuals, rank, singular_values = torch.linalg.lstsq(F_RXAf, score_Q_BRXX)
+        # B_BAfAf = torch.tile(B_AfAf[None, ...], (score_x_Q_comp_BRAfX.shape[0], 1, 1))
+        B_RAfAf = torch.tile(B_AfAf[None, ...], (F_pinv_RXAf.shape[0], 1, 1))
+        DG_Q_RAfX = (F_pinv_RXAf @ B_RAfAf).permute(0, 2, 1)
+        score_x_Q_comp_BRAfX = torch.einsum("brij, rai -> braj", score_Q_BRXX, DG_Q_RAfX)
+        score_x_BRAfX = score_x_r_comp_BRAfX + score_x_Q_comp_BRAfX
+        # the mask below just gets rid of the padding for the glycine atoms
+        score_x_BAbX = score_x_BRAfX.flatten(1, 2)[:, self.frame_mask_RAf.flatten()].reshape(
+            score_x_BRAfX.shape[0], -1, 3
+        )
+        return score_x_BAbX
 
     def forward(self, x1, x2, z=None):
         return self.om_interpolate(x1, x2)
@@ -516,13 +559,13 @@ class Interpolator(torch.nn.Module):
 
         # convert to frame coordinates
         start_r_BRX, start_Q_BRXX = self.all_atom_euclidian_to_frame(start_x_BAX)
-        start_r_BAbX_reconstructed = self.frame_to_euclidian(start_r_BRX, start_Q_BRXX) # check that the reconstruction works
-        start_x_BAbX = og_start_x_BAX[:, self.backbone_mask, :]
-        assert torch.norm(start_x_BAbX - start_x_BAbX, dim=2).max() < 4, f"Reconstruction error on startpoint too large: {torch.norm(start_x_BAbX - start_x_BAbX, dim=2).max().item()}"
+        start_x_BAbX_reconstructed = self.frame_to_euclidian_backbone(start_r_BRX, start_Q_BRXX) # check that the reconstruction works
+        start_x_BAbX = self.all_atom_to_backbone(start_x_BAX)
+        assert torch.norm(start_x_BAbX_reconstructed - start_x_BAbX, dim=2).max() < 4, f"Reconstruction error on startpoint too large: {torch.norm(start_x_BAbX - start_x_BAbX, dim=2).max().item()}"
         end_r_BRX, end_Q2_BRXX = self.all_atom_euclidian_to_frame(end_x_BAX)
-        end_x_BAbX_reconstructed = self.frame_to_euclidian(end_r_BRX, end_Q2_BRXX) # check that the reconstruction works
-        end_x_BabX = og_end_x_BAX[:, self.backbone_mask, :]
-        assert torch.norm(end_x_BAbX_reconstructed - end_x_BabX, dim=2).max() < 4, f"Reconstruction error on endpoint too large: {torch.norm(end_x_BAbX_reconstructed - end_x_BabX, dim=2).max().item()}"
+        end_x_BAbX_reconstructed = self.frame_to_euclidian_backbone(end_r_BRX, end_Q2_BRXX) # check that the reconstruction works
+        end_x_BAbX = self.all_atom_to_backbone(end_x_BAX)
+        assert torch.norm(end_x_BAbX_reconstructed - end_x_BAbX, dim=2).max() < 4, f"Reconstruction error on endpoint too large: {torch.norm(end_x_BAbX_reconstructed - end_x_BAbX, dim=2).max().item()}"
 
         # noise to self.t_lat
         lat_start_batch = self.get_latent_samples(start_r_BRX, start_Q_BRXX)
@@ -635,19 +678,25 @@ class Interpolator(torch.nn.Module):
             denoised_r_BPRX.requires_grad = False
             denoised_Q_BPRX.requires_grad = False
 
-            denoised_x_BpAbX = self.frame_to_euclidian(denoised_r_BPRX.flatten(0, 1), denoised_Q_BPRX.flatten(0, 1))
+            denoised_x_BpAbX = self.frame_to_euclidian_backbone(denoised_r_BPRX.flatten(0, 1), denoised_Q_BPRX.flatten(0, 1))
 
             denoised_st_x_BAbX = denoised_x_BpAbX[0].unsqueeze(0)
-            reconstructed_st_x_BAbX = self.frame_to_euclidian(*self.euclidian_to_frame(denoised_st_x_BAbX))
+            reconstructed_st_x_BAbX = self.frame_to_euclidian_backbone(*self.backbone_euclidian_to_frame(denoised_st_x_BAbX))
             assert torch.all(torch.norm(denoised_st_x_BAbX - reconstructed_st_x_BAbX, dim=2) < 4), f"Reconstruction error on denoised start point too large: {torch.norm(denoised_st_x_BAbX - reconstructed_st_x_BAbX, dim=2).max().item()}"
 
-            denoised_x_BpAbX_reconstructed = self.frame_to_euclidian(*self.euclidian_to_frame(denoised_x_BpAbX))
+            denoised_x_BpAbX_reconstructed = self.frame_to_euclidian_backbone(*self.backbone_euclidian_to_frame(denoised_x_BpAbX))
             assert torch.all(torch.norm(denoised_x_BpAbX - denoised_x_BpAbX_reconstructed, dim=2) < 4), f"Reconstruction error on denoised path too large: {torch.norm(denoised_x_BpAbX - denoised_x_BpAbX_reconstructed.flatten(0, 1), dim=2).max().item()}"
 
             denoised_x_BPAbX = denoised_x_BpAbX.view(
                 n_paths, self.path_length, -1, 3 # -1 should be number of backbone atoms--97 for trpcage
             )
 
+
+            actions = [[] for _ in range(n_paths)]
+            all_path_xs_BO = [[] for _ in range(n_paths)]
+            path_terms = [[] for _ in range(n_paths)]
+            force_terms = [[] for _ in range(n_paths)]
+            laplace_terms = [[] for _ in range(n_paths)]
             for b in range(n_paths):
                 pbar = tqdm(range(self.om_steps))
                 denoised_x_PAbX = denoised_x_BPAbX[b].clone()
@@ -661,93 +710,74 @@ class Interpolator(torch.nn.Module):
                     
 
                     path_displacements_PAbX = denoised_x_PAbX[1:] - denoised_x_PAbX[:-1]
-                    path_distances_PAb = torch.linalg.vector_norm(path_displacements_PAbX)
+                    path_distances_PAb = torch.linalg.vector_norm(path_displacements_PAbX, dim=2)
                     # Below is the OM term for difference in euclidian position over the time interval
                     # Note mean is over particles and path positions
                     # equations in the paper are for single particles
                     # we sum over particles here just for convenience with autograd
                     # we also rescale by dt because this terms comes from brownian motion
-                    distance_term = path_distances_PAb.mean() / (2 * self.dt)
+                    distance_term = (path_distances_PAb / (2 * self.dt)).mean()
 
-                    # path_forces_PAbX = self.get_forces(denoised_x_PAbX, self.t_opt)
-                    # path_force_mags_PAb = torch.linalg.vector_norm(path_forces_PAbX)
-                    # # Below is the OM term for the size of the forces at each configuration of the system
-                    # # Note force = grad potential = score up to constant scaling factors
-                    # force_term = path_force_mags_PAb.mean() * self.dt / (2 * self.zeta_Ab ** 2) 
+                    path_forces_PAbX = self.get_forces(denoised_x_PAbX, self.t_opt)
+                    path_force_mags_PAb = torch.linalg.vector_norm(path_forces_PAbX, dim=2)
+                    # Below is the OM term for the size of the forces at each configuration of the system
+                    # Note force = grad potential = score up to constant scaling factors
+                    force_term = (path_force_mags_PAb * self.dt / (2 * self.zeta_Ab.unsqueeze(0) ** 2)).mean()
 
-                    # # TODO, for now we're using the truncated action in the regime of low diffusion coefficient
-                    # instability_term = 0.0 * self.D * self.dt / self.zeta_Ab # laplacian of the potential / divergence of the score
+                    # TODO, for now we're using the truncated action in the regime of low diffusion coefficient
+                    instability_term = (0.0 * self.D * self.dt / self.zeta_Ab).mean() # laplacian of the potential / divergence of the score
 
-                    # action = distance_term + force_term + instability_term
-                    # grads = torch.autograd.grad(action, denoised_x_PAbX)
+                    action = distance_term + force_term + instability_term
+                    # grads = torch.autograd.grad(action, denoised_x_PAbX, retain_graph=True)[0]
+                    grads = torch.autograd.grad(action, denoised_x_PAbX)[0]
+                    action, distance_term, force_term, instability_term = (
+                        action.item(),
+                        distance_term.item(),
+                        force_term.item(),
+                        instability_term.item(),
+                    )
+                    actions[b].append(action)
+                    path_terms[b].append(distance_term)
+                    force_terms[b].append(force_term)
+                    laplace_terms[b].append(instability_term)
 
-        #                 # Compute gradients for this batch and accumulate
-        #                 batch_grads = torch.autograd.grad(batch_action, path_batch)[0]
-        #                 grads_accumulator[:, start_idx : end_idx + 1] += batch_grads
+                    with torch.no_grad():
+                        # Zero out gradients for endpoints (they should be fixed)
+                        grads[:, 0], grads[:, -1] = 0, 0
+                        denoised_x_PAbX.grad = grads
+                        optimizer.step()
+                        optimizer.zero_grad()
 
-        #                 # Accumulate action values for logging
-        #                 total_action += batch_action.item()
-        #                 total_first_term += batch_first_term.item()
-        #                 total_second_term += batch_second_term.item()
-        #                 total_third_term += batch_third_term.item()
+                        # not using this now, but could see it being useful before the optimizer step
+                        # if add_noise:
+                        #     # Add noise to gradients
+                        #     _t = (
+                        #         torch.tensor([max(1000 - i - 1, diff_time)])
+                        #     …   
 
-        #                 # Free memory
-        #                 del path_batch, batch_forces, batch_action, batch_grads
-        #                 torch.cuda.empty_cache()
+                    all_path_xs_BO[b].append(denoised_x_PAbX.clone().detach())
+                    # want this as a denominator to tell us how much the magnitude of this term
+                    # contributes to the total action, hence the abs for the instability,
+                    # which can be negative (stable)
+                    total_abs = distance_term + force_term + abs(instability_term)
+                    path_contribution = (
+                        distance_term / total_abs if total_abs != 0 else 0
+                    )
+                    force_contribution = (
+                        force_term / total_abs if total_abs != 0 else 0
+                    )
+                    laplace_contribution = (
+                        abs(instability_term) / total_abs if total_abs != 0 else 0
+                    )
+                    pbar.set_description(
+                        f"OM Action: {action}, Path Contribution: {round(path_contribution*100, 3)}%, Force Contribution: {round(force_contribution * 100, 3)}%, Laplace Contribution: {round(laplace_contribution * 100, 3)}%"
+                    )
 
-        #             # Log the action values
-        #             actions.append(total_action)
-        #             path_terms.append(total_first_term)
-        #             force_terms.append(total_second_term)
-        #             laplace_terms.append(total_third_term)
+                    del distance_term, force_term, instability_term, action, grads
+                    torch.cuda.empty_cache()
 
-        #             with torch.no_grad():
-        #                 # Zero out gradients for endpoints (they should be fixed)
-        #                 grads_accumulator[:, 0], grads_accumulator[:, -1] = 0, 0
-
-        #                 if add_noise:
-        #                     # Add noise to gradients
-        #                     _t = (
-        #                         torch.tensor([max(1000 - i - 1, diff_time)])
-        #                         .repeat(noised_xs.shape[0] * noised_xs.shape[1])
-        #                         .to(self.device)
-        #                     )
-        #                     _, _, model_log_variance = self.p_mean_variance(
-        #                         center_zero(noised_xs.reshape(-1, self.num_atoms, 3)), _t
-        #                     )
-        #                     noise = torch.randn_like(
-        #                         noised_xs.reshape(-1, self.num_atoms, 3)
-        #                     )
-        #                     noise = center_zero(noise)
-        #                     path_noise = (
-        #                         (0.5 * model_log_variance).exp() * noise * temperature
-        #                     )
-        #                     grads_accumulator = (
-        #                         grads_accumulator
-        #                         + path_noise.reshape(grads_accumulator.shape) / lr
-        #                     )
-
-        #                 # Apply gradients and update
-        #                 noised_xs.grad = grads_accumulator
-        #                 optimizer.step()
-        #                 if cosine_scheduler:
-        #                     scheduler.step()
-
-        #             all_noised_xs.append(noised_xs.clone().detach())
-        #             # account for sign ambiguity of third term
-        #             total_abs = total_first_term + total_second_term + abs(total_third_term)
-        #             path_contribution = (
-        #                 total_first_term / total_abs if total_abs != 0 else 0
-        #             )
-        #             force_contribution = (
-        #                 total_second_term / total_abs if total_abs != 0 else 0
-        #             )
-        #             laplace_contribution = (
-        #                 abs(total_third_term) / total_abs if total_abs != 0 else 0
-        #             )
-        #             pbar.set_description(
-        #                 f"OM Action: {total_action}, Path Contribution: {round(path_contribution*100, 3)}%, Force Contribution: {round(force_contribution * 100, 3)}%, Laplace Contribution: {round(laplace_contribution * 100, 3)}%"
-        #             )
+                del denoised_x_PAbX 
+                torch.cuda.empty_cache()
 
         # Save PDBs from the 0th batch for a quick check
         self.c_alpha_to_pdb(start_x_BAX[0][self.c_alpha_mask], self.output_path / "start.pdb")
@@ -765,12 +795,21 @@ class Interpolator(torch.nn.Module):
         # for i in range(20, self.path_length + 1, 20):
             self.c_alpha_to_pdb(denoised_r_BPRX[0, i, :, :], self.output_path / f"denoised_{i}.pdb")
 
-        final_path = denoised_r_BPRX.flatten(0, 1)
-        all_paths = torch.stack([final_path.clone() for _ in range(0, self.om_steps + 1, 50)])
-        force_terms = torch.abs(torch.randn(self.om_steps))
-        path_terms = torch.abs(torch.randn(self.om_steps))
-        actions = force_terms + path_terms
-        
+        all_denoised_paths = []
+        all_path_xs_B = [torch.stack(path_opt_steps) for path_opt_steps in all_path_xs_BO]
+        all_path_xs_OBPAbX = torch.stack(all_path_xs_B, dim=0).permute(1, 0, 2, 3, 4)
+        # decode the optimized paths (keeping every 50 for future visualization)
+        for path in all_path_xs_OBPAbX[::50]:
+            path[:, 0], path[:, -1] = start_x_BAbX, end_x_BAbX
+            n_atoms = start_x_BAbX.shape[1]
+            path = path.reshape(-1, n_atoms, 3) # * self.norm_factor in the original om code from OMBasics
+            all_denoised_paths.append(path)
+
+        final_path = all_denoised_paths[-1]
+        all_paths = torch.stack(all_denoised_paths, dim=0)
+        actions = torch.tensor(actions).sum(dim=0)
+        path_terms = torch.tensor(path_terms).sum(dim=0)
+        force_terms = torch.tensor(force_terms).sum(dim=0)
         return {
             "final_path": final_path,
             "all_paths": all_paths,
