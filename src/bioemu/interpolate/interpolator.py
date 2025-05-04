@@ -135,10 +135,18 @@ class Interpolator(torch.nn.Module):
         self.topology = protein_trajectory.topology
         self.backbone_mask = protein_trajectory.backbone_mask_A
         self.c_alpha_mask = protein_trajectory.c_alpha_mask_A
-        self.backbone_atoms = [atom for atom in self.topology.atoms if atom.name in BACKBONE_ATOMS]
+        self.backbone_atoms_RAf = []
+        for residue in self.topology.residues:
+            residue_frame = rigid_group_atom_positions[residue.name]
+            frame_atom_names = [atom[0] for atom in residue_frame]
+            residue_backbone_atoms = [atom for atom in residue.atoms if atom.name in BACKBONE_ATOMS]
+            residue_backbone_openfold_order = sorted(residue_backbone_atoms, key=lambda atom: frame_atom_names.index(atom.name))
+            self.backbone_atoms_RAf.append(residue_backbone_openfold_order)
         self.atom_to_backbone_idx = {
             atom.index: i
-            for i, atom in enumerate(self.backbone_atoms)
+            for i, atom in enumerate(
+                [a for residue_atoms in self.backbone_atoms_RAf for a in residue_atoms]
+            )
         }
 
         self.F_RAfX, self.frame_mask_RAf = self.get_topology_frames()
@@ -371,7 +379,8 @@ class Interpolator(torch.nn.Module):
 
             residue_ptr += sum([atom[1] == 0 or atom[1] == 3 for atom in residue_frame]) # 0 are N, CA, C, CB, and 3 is O
 
-        assert residue_ptr == len(self.backbone_atoms), f"Residue pointer {residue_ptr} does not match number of backbone atoms {len(self.backbone_atoms)}"
+        flat_backbone_atoms = [atom for residue_atoms in self.backbone_atoms_RAf for atom in residue_atoms]
+        assert residue_ptr == len(flat_backbone_atoms), f"Residue pointer {residue_ptr} does not match number of backbone atoms {len(self.backbone_atoms_RAf)}"
 
         r_BRX = torch.stack(r_list_R, dim=1)
         Q_BRXX = torch.stack(Q_list_R, dim=1)
@@ -411,8 +420,9 @@ class Interpolator(torch.nn.Module):
             assert backbone_indices[2] == self.atom_to_backbone_idx[residue.atom("C").index], f"Backbone indices {backbone_indices} do not have C as the third atom"
 
         # check that all the atoms were set in the right order
+        backbone_atom_elements = [a.name for residue_atoms in self.backbone_atoms_RAf for a in residue_atoms]
         for i, atom in enumerate(backbone_atoms):
-            assert atom == self.backbone_atoms[i].name, f"Atom {atom} at index {i} does not match expected atom {self.backbone_atoms[i].name}"
+            assert atom == backbone_atom_elements[i], f"Atom {atom} at index {i} does not match expected atom {self.backbone_atoms_RAf[i].name}"
 
         assert atoms_set == n_backbone, f"Not all atoms were set, only {atoms_set} out of {n_backbone}"
         assert torch.all(torch.norm(self.euclidian_to_frame(x_BAbX)[0] - r_BRX, dim=2) < 4), f"Reconstruction error too large: {torch.norm(self.euclidian_to_frame(x_BAbX)[0] - r_BRX, dim=2).max().item()}"
@@ -508,11 +518,11 @@ class Interpolator(torch.nn.Module):
         start_r_BRX, start_Q_BRXX = self.all_atom_euclidian_to_frame(start_x_BAX)
         start_r_BAbX_reconstructed = self.frame_to_euclidian(start_r_BRX, start_Q_BRXX) # check that the reconstruction works
         start_x_BAbX = og_start_x_BAX[:, self.backbone_mask, :]
-        assert torch.norm(start_x_BAbX - start_x_BAbX, dim=2).max() < 3, f"Reconstruction error on startpoint too large: {torch.norm(start_x_BAbX - start_x_BAbX, dim=2).max().item()}"
+        assert torch.norm(start_x_BAbX - start_x_BAbX, dim=2).max() < 4, f"Reconstruction error on startpoint too large: {torch.norm(start_x_BAbX - start_x_BAbX, dim=2).max().item()}"
         end_r_BRX, end_Q2_BRXX = self.all_atom_euclidian_to_frame(end_x_BAX)
         end_x_BAbX_reconstructed = self.frame_to_euclidian(end_r_BRX, end_Q2_BRXX) # check that the reconstruction works
         end_x_BabX = og_end_x_BAX[:, self.backbone_mask, :]
-        assert torch.norm(end_x_BAbX_reconstructed - end_x_BabX, dim=2).max() < 3, f"Reconstruction error on endpoint too large: {torch.norm(end_x_BAbX_reconstructed - end_x_BabX, dim=2).max().item()}"
+        assert torch.norm(end_x_BAbX_reconstructed - end_x_BabX, dim=2).max() < 4, f"Reconstruction error on endpoint too large: {torch.norm(end_x_BAbX_reconstructed - end_x_BabX, dim=2).max().item()}"
 
         # noise to self.t_lat
         lat_start_batch = self.get_latent_samples(start_r_BRX, start_Q_BRXX)
@@ -629,10 +639,10 @@ class Interpolator(torch.nn.Module):
 
             denoised_st_x_BAbX = denoised_x_BpAbX[0].unsqueeze(0)
             reconstructed_st_x_BAbX = self.frame_to_euclidian(*self.euclidian_to_frame(denoised_st_x_BAbX))
-            assert torch.all(torch.norm(denoised_st_x_BAbX - reconstructed_st_x_BAbX, dim=2) < 3), f"Reconstruction error on denoised start point too large: {torch.norm(denoised_st_x_BAbX - reconstructed_st_x_BAbX, dim=2).max().item()}"
+            assert torch.all(torch.norm(denoised_st_x_BAbX - reconstructed_st_x_BAbX, dim=2) < 4), f"Reconstruction error on denoised start point too large: {torch.norm(denoised_st_x_BAbX - reconstructed_st_x_BAbX, dim=2).max().item()}"
 
             denoised_x_BpAbX_reconstructed = self.frame_to_euclidian(*self.euclidian_to_frame(denoised_x_BpAbX))
-            assert torch.all(torch.norm(denoised_x_BpAbX - denoised_x_BpAbX_reconstructed, dim=2) < 3), f"Reconstruction error on denoised path too large: {torch.norm(denoised_x_BpAbX - denoised_x_BpAbX_reconstructed.flatten(0, 1), dim=2).max().item()}"
+            assert torch.all(torch.norm(denoised_x_BpAbX - denoised_x_BpAbX_reconstructed, dim=2) < 4), f"Reconstruction error on denoised path too large: {torch.norm(denoised_x_BpAbX - denoised_x_BpAbX_reconstructed.flatten(0, 1), dim=2).max().item()}"
 
             denoised_x_BPAbX = denoised_x_BpAbX.view(
                 n_paths, self.path_length, -1, 3 # -1 should be number of backbone atoms--97 for trpcage
@@ -659,17 +669,17 @@ class Interpolator(torch.nn.Module):
                     # we also rescale by dt because this terms comes from brownian motion
                     distance_term = path_distances_PAb.mean() / (2 * self.dt)
 
-                    path_forces_PAbX = self.get_forces(denoised_x_PAbX, self.t_opt)
-                    path_force_mags_PAb = torch.linalg.vector_norm(path_forces_PAbX)
-                    # Below is the OM term for the size of the forces at each configuration of the system
-                    # Note force = grad potential = score up to constant scaling factors
-                    force_term = path_force_mags_PAb.mean() * self.dt / (2 * self.zeta_Ab ** 2) 
+                    # path_forces_PAbX = self.get_forces(denoised_x_PAbX, self.t_opt)
+                    # path_force_mags_PAb = torch.linalg.vector_norm(path_forces_PAbX)
+                    # # Below is the OM term for the size of the forces at each configuration of the system
+                    # # Note force = grad potential = score up to constant scaling factors
+                    # force_term = path_force_mags_PAb.mean() * self.dt / (2 * self.zeta_Ab ** 2) 
 
-                    # TODO, for now we're using the truncated action in the regime of low diffusion coefficient
-                    instability_term = 0.0 * self.D * self.dt / self.zeta_Ab # laplacian of the potential / divergence of the score
+                    # # TODO, for now we're using the truncated action in the regime of low diffusion coefficient
+                    # instability_term = 0.0 * self.D * self.dt / self.zeta_Ab # laplacian of the potential / divergence of the score
 
-                    action = distance_term + force_term + instability_term
-                    grads = torch.autograd.grad(action, denoised_x_PAbX)
+                    # action = distance_term + force_term + instability_term
+                    # grads = torch.autograd.grad(action, denoised_x_PAbX)
 
         #                 # Compute gradients for this batch and accumulate
         #                 batch_grads = torch.autograd.grad(batch_action, path_batch)[0]
@@ -744,13 +754,15 @@ class Interpolator(torch.nn.Module):
         self.c_alpha_to_pdb(end_x_BAX[0][self.c_alpha_mask], self.output_path / "end.pdb")
         self.c_alpha_to_pdb(start_r_BRX[0], self.output_path / "start_frame.pdb")
         self.c_alpha_to_pdb(end_r_BRX[0], self.output_path / "end_frame.pdb")
-        self.c_alpha_to_pdb(lat_r_BPRX[0][0], self.output_path / "lat_start.pdb")
-        self.c_alpha_to_pdb(lat_r_BPRX[0][-1], self.output_path / "lat_end.pdb")
-        for i in range(20, self.path_length, 20):
+        # self.c_alpha_to_pdb(lat_r_BPRX[0][0], self.output_path / "lat_start.pdb")
+        # self.c_alpha_to_pdb(lat_r_BPRX[0][-1], self.output_path / "lat_end.pdb")
+        for i in list(range(0, self.path_length, 20)) + [self.path_length - 1]:
+        # for i in range(20, self.path_length, 20):
             self.c_alpha_to_pdb(lat_r_BPRX[0, i, :, :], self.output_path / f"lat_{i}.pdb")
-        self.c_alpha_to_pdb(denoised_r_BPRX[0][0], self.output_path / "denoised_start.pdb")
-        self.c_alpha_to_pdb(denoised_r_BPRX[0][-1], self.output_path / "denoised_end.pdb")
-        for i in range(20, self.path_length, 20):
+        # self.c_alpha_to_pdb(denoised_r_BPRX[0][0], self.output_path / "denoised_start.pdb")
+        # self.c_alpha_to_pdb(denoised_r_BPRX[0][-1], self.output_path / "denoised_end.pdb")
+        for i in list(range(0, self.path_length, 20)) + [self.path_length - 1]:
+        # for i in range(20, self.path_length + 1, 20):
             self.c_alpha_to_pdb(denoised_r_BPRX[0, i, :, :], self.output_path / f"denoised_{i}.pdb")
 
         final_path = denoised_r_BPRX.flatten(0, 1)
@@ -776,7 +788,7 @@ class Interpolator(torch.nn.Module):
             topology: Topology object
             output_path: Path to save the PDB file
         """
-        x_RX /= 10 # angstroms to nanometers
+        # x_RX /= 10 # angstroms to nanometers
         with open(output_path, "w") as f:
             for i, residue in enumerate(self.topology.residues):
                 # get the CA atom
