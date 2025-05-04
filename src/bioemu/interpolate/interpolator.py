@@ -68,6 +68,7 @@ class Interpolator(torch.nn.Module):
         # Specify parameters for the optimizer
         lr=2e-1,
         om_steps=500,
+        path_opt_log_step=10, # log paths every 50 steps
         path_batch_size=-1, # -1 Turns off batch optimization--do the whole path
         # if this is -1, the batch size for other bioemu calls will also be set to the path_length
 
@@ -115,6 +116,7 @@ class Interpolator(torch.nn.Module):
         self.t_lat = initial_guess_level
 
         self.om_steps = om_steps
+        self.path_opt_log_step = path_opt_log_step
         self.optimizer_cls = optimizer
         self.lr = lr
 
@@ -690,6 +692,8 @@ class Interpolator(torch.nn.Module):
             denoised_x_BPAbX = denoised_x_BpAbX.view(
                 n_paths, self.path_length, -1, 3 # -1 should be number of backbone atoms--97 for trpcage
             )
+            denoised_x_BPAbX[:, 0, :, :] = start_x_BAbX
+            denoised_x_BPAbX[:, -1, :, :] = end_x_BAbX
 
 
             actions = [[] for _ in range(n_paths)]
@@ -743,7 +747,7 @@ class Interpolator(torch.nn.Module):
 
                     with torch.no_grad():
                         # Zero out gradients for endpoints (they should be fixed)
-                        grads[:, 0], grads[:, -1] = 0, 0
+                        grads[0], grads[-1] = 0, 0
                         denoised_x_PAbX.grad = grads
                         optimizer.step()
                         optimizer.zero_grad()
@@ -789,24 +793,30 @@ class Interpolator(torch.nn.Module):
         for i in list(range(0, self.path_length, 20)) + [self.path_length - 1]:
         # for i in range(20, self.path_length, 20):
             self.c_alpha_to_pdb(lat_r_BPRX[0, i, :, :], self.output_path / f"lat_{i}.pdb")
-        # self.c_alpha_to_pdb(denoised_r_BPRX[0][0], self.output_path / "denoised_start.pdb")
-        # self.c_alpha_to_pdb(denoised_r_BPRX[0][-1], self.output_path / "denoised_end.pdb")
-        for i in list(range(0, self.path_length, 20)) + [self.path_length - 1]:
-        # for i in range(20, self.path_length + 1, 20):
-            self.c_alpha_to_pdb(denoised_r_BPRX[0, i, :, :], self.output_path / f"denoised_{i}.pdb")
 
-        all_denoised_paths = []
         all_path_xs_B = [torch.stack(path_opt_steps) for path_opt_steps in all_path_xs_BO]
         all_path_xs_OBPAbX = torch.stack(all_path_xs_B, dim=0).permute(1, 0, 2, 3, 4)
         # decode the optimized paths (keeping every 50 for future visualization)
-        for path in all_path_xs_OBPAbX[::50]:
-            path[:, 0], path[:, -1] = start_x_BAbX, end_x_BAbX
-            n_atoms = start_x_BAbX.shape[1]
-            path = path.reshape(-1, n_atoms, 3) # * self.norm_factor in the original om code from OMBasics
-            all_denoised_paths.append(path)
+        all_path_xs_OBPAbX = torch.concat([all_path_xs_OBPAbX[::self.path_opt_log_step], all_path_xs_OBPAbX[-1:]], dim=0)
+        n_opt_log_steps = all_path_xs_OBPAbX.shape[0]
+        # Reset the start/end points--shouldn't need this since we set the grads to 0
+        # all_path_xs_OBPAbX[:, :, 0] = torch.tile(start_x_BAbX[None, ...], (n_opt_log_steps, 1, 1, 1))
+        # all_path_xs_OBPAbX[:, :, -1] = torch.tile(end_x_BAbX[None, ...], (n_opt_log_steps, 1, 1, 1))
+        assert torch.all(
+            torch.norm(all_path_xs_OBPAbX[:, :, 0] - start_x_BAbX, dim=2) < 4
+        ), f"Reconstruction error on start point too large: {torch.norm(all_path_xs_OBPAbX[:, 0] - start_x_BAbX, dim=2).max().item()}\nSomehow changed during optimization of the paths"
+        assert torch.all(
+            torch.norm(all_path_xs_OBPAbX[:, :, -1] - end_x_BAbX, dim=2) < 4
+        ), f"Reconstruction error on endpoint too large: {torch.norm(all_path_xs_OBPAbX[:, -1] - end_x_BAbX, dim=2).max().item()}\nSomehow changed during optimization of the paths"
+        all_path_xs_OBPAbX[0] = denoised_x_BPAbX # reset the first point to the initial denoised point
 
-        final_path = all_denoised_paths[-1]
-        all_paths = torch.stack(all_denoised_paths, dim=0)
+        for i in range(len(all_path_xs_OBPAbX)):
+            for j in list(range(0, self.path_length, 20)) + [self.path_length - 1]:
+                self.c_alpha_to_pdb(all_path_xs_OBPAbX[i, 0, j], self.output_path / f"denoised_{j}_step_{i * self.path_opt_log_step}.pdb")
+
+        final_path = all_path_xs_OBPAbX[-1].flatten(0, 1)
+        n_atoms = start_x_BAbX.shape[1]
+        all_paths = all_path_xs_OBPAbX.reshape(all_path_xs_OBPAbX.shape[0], -1, n_atoms, 3)
         actions = torch.tensor(actions).sum(dim=0)
         path_terms = torch.tensor(path_terms).sum(dim=0)
         force_terms = torch.tensor(force_terms).sum(dim=0)
