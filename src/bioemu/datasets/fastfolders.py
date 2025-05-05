@@ -118,6 +118,11 @@ class FastFolderTrajectory:
             f"{self.molecule.value}-from-mae.pdb"
         )
 
+        # remove all hydrogens    
+        hydrogen_indices = [atom.index for atom in self.topology.atoms if atom.element.symbol == "H"]
+        for i in hydrogen_indices[::-1]:
+            self.topology.delete_atom_by_index(i)
+
         # Get masks to help get atoms of interest from the all atom topologies
         # WARNING: Although there are 20 residues, the number of atoms is not 20*5 = 100
         # because some residues have less than 5 atoms (e.g. GLY)
