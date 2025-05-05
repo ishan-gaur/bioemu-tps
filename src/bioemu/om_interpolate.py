@@ -13,6 +13,10 @@ from bioemu.datasets.fastfolders import CLUSTER_ENDPOINTS
 
 from typing import cast
 
+# To use this script, you need the all atom MAE structure of a protein that has been converted to PDB using ChimeraX
+# You also need the all-atom and c-alpha coarse-grained all atom trajectories
+# You also need to set a breakpoint in the OM interpolate sample.py script and save the start and end points
+
 @hydra.main(version_base=None, config_path="config", config_name="config")
 def main(cfg: DictConfig) -> None:
     """
@@ -27,6 +31,9 @@ def main(cfg: DictConfig) -> None:
         Ab: Backbone atom
         X: Spatial coordinates (3)
     """
+    exp_tag = None
+    if exp_tag is not None:
+        input(f"WARNING: You are running the experiment with the tag {exp_tag}. This may not be the intended experiment. Press Enter to continue or Ctrl+C to exit.")
     protein_name = cfg.protein_name
     num_trajectories = cfg.num_trajectories
     path_length = cfg.path_length
@@ -38,8 +45,7 @@ def main(cfg: DictConfig) -> None:
     assert protein_name in Molecule.__members__, f"Protein {protein_name} not found in the dataset. Please check the name."
     if isinstance(output_dir, str):
         output_dir = Path(output_dir)
-    # the * 1000 is because bioemu does diffusion in 0 to 1 but the two-for-one paper did in in 0 to 1000 so that's what sanjeev's code expects
-    exp_append_name = f"test_initial_latent_time_{int(cfg.interpolator.initial_guess_level * 1000)}_physical_params_dt={dt}"
+    exp_append_name = f"t_lat={cfg.interpolator.initial_guess_level}_t_opt={cfg.interpolator.latent_time}_physical_params_dt={dt}_path_len={path_length}_num_traj={num_trajectories}_{exp_tag}"
     eval_folder = output_dir / protein_name.lower() / f"main_eval_output_bioemu_interpolate_{exp_append_name}"
     eval_folder.mkdir(parents=True, exist_ok=True)
 

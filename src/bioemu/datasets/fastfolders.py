@@ -132,8 +132,12 @@ class FastFolderTrajectory:
 
         self.ground_truth_traj_FAX = torch.load(
             ref_data_home / self.molecule.value / "gt_traj_all_atom.pt",
-            weights_only=True
+            weights_only=False
         ) # shape is (1044000, 272, 3) 
+        # why does this not work with weights_only=True?
+        # because it is a numpy array for some of these...
+        if isinstance(self.ground_truth_traj_FAX, np.ndarray):
+            self.ground_truth_traj_FAX = torch.tensor(self.ground_truth_traj_FAX, dtype=torch.float32)
         # no longer needed after converting to pdb
         # mae_to_pdb_map = mae_to_pdb_atom_mapping(self.molecule, om_home, ref_data_home, forward=True)
         # ground_truth_traj = ground_truth_traj[:, mae_to_pdb_map, :]

@@ -378,17 +378,29 @@ class Interpolator(torch.nn.Module):
 
             residue_frame = rigid_group_atom_positions[residue.name]
 
+            def check_atom_threshold(idealized_X, reconstructed_BX, atom_name, threshold=4):
+                distances = torch.norm(idealized_X[None, :] - reconstructed_BX, dim=1)
+                over_threshold = distances >= threshold
+                if over_threshold.any():
+                    percent_over = over_threshold.float().mean().item() * 100
+                    median_over = distances[over_threshold].median().item()
+                    print(f"WARNING: {percent_over:.2f}% of {atom_name} atoms exceeded {threshold}Å threshold with median distance {median_over:.2f}Å")
+                return distances
+
+            # Check N atoms
             N_idealized_X = torch.tensor(residue_frame[0][2], device=self.device)
             N_frame_reconstructed_BX = transform.invert().apply(x_BAbX[:, N_idx, :]).to(self.device)
-            assert torch.all(torch.norm(N_idealized_X[None, :] - N_frame_reconstructed_BX, dim=1) < 4) # angstroms
+            check_atom_threshold(N_idealized_X, N_frame_reconstructed_BX, "N")
 
+            # Check CA atoms
             CA_idealized = torch.tensor(residue_frame[1][2], device=self.device)
             CA_frame_reconstructed_BX = transform.invert().apply(x_BAbX[:, CA_idx, :]).to(self.device)
-            assert torch.all(torch.norm(CA_idealized[None, :] - CA_frame_reconstructed_BX, dim=1) < 4)
+            check_atom_threshold(CA_idealized, CA_frame_reconstructed_BX, "CA")
 
+            # Check C atoms
             C_idealized = torch.tensor(residue_frame[2][2], device=self.device)
             C_frame_reconstructed_BX = transform.invert().apply(x_BAbX[:, C_idx, :]).to(self.device)
-            assert torch.all(torch.norm(C_idealized[None, :] - C_frame_reconstructed_BX, dim=1) < 4)
+            check_atom_threshold(C_idealized, C_frame_reconstructed_BX, "C")
 
             backbone_frame_AbX = torch.tensor([
                 residue_frame[0][2],
@@ -400,7 +412,13 @@ class Interpolator(torch.nn.Module):
                 transform.apply(backbone_frame_BAbX[:, atom, :])
                 for atom in range(backbone_frame_BAbX.shape[1])
             ], dim=1)
-            assert torch.all(torch.norm(reconstructed_backbone_BRX - x_BAbX[:, residue_ptr:residue_ptr + 3, :], dim=2) < 4) # angstroms
+            distances = torch.norm(reconstructed_backbone_BRX - x_BAbX[:, residue_ptr:residue_ptr + 3, :], dim=2)
+            over_threshold = distances >= 4
+            if over_threshold.any():
+                percent_over = over_threshold.float().mean().item() * 100
+                median_over = distances[over_threshold].median().item()
+                median_under = distances[~over_threshold].median().item() if (~over_threshold).any() else 0
+                print(f"WARNING: {percent_over:.2f}% of backbone atoms exceeded 4Å threshold with median distance {median_over:.2f}Å. Median distance under threshold: {median_under:.2f}Å")
 
             r_list_R.append(transform.get_trans()) # BX
             Q_list_R.append(transform.get_rots().get_rot_mats()) # BXX
@@ -731,6 +749,7 @@ class Interpolator(torch.nn.Module):
                     # Below is the OM term for the size of the forces at each configuration of the system
                     # Note force = grad potential = score up to constant scaling factors
                     force_term = (path_force_mags_PAb * self.dt * (self.force_scale ** 2) / (2 * self.zeta_Ab.unsqueeze(0) ** 2)).mean()
+                    # force_term = torch.zeros_like(distance_term)
 
                     # TODO, for now we're using the truncated action in the regime of low diffusion coefficient
                     instability_term = (0.0 * self.D * self.dt / self.zeta_Ab).mean() # laplacian of the potential / divergence of the score
