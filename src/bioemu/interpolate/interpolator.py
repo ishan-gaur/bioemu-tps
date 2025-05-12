@@ -869,7 +869,7 @@ class Interpolator(torch.nn.Module):
         with open(output_path, "w") as f:
             for i, residue in enumerate(self.topology.residues):
                 # get the CA atom
-                CA_idx = residue.atom("CA").index
+                # CA_idx = residue.atom("CA").index
                 # write the CA atom to the PDB file
                 f.write(f"ATOM  {i+1:5d}  CA  {residue.name:<3} {residue.index:4d}    {x_RX[i, 0]:8.3f}{x_RX[i, 1]:8.3f}{x_RX[i, 2]:8.3f}\n")
             # write the end of the PDB file

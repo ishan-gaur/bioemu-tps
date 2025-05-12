@@ -3,6 +3,7 @@ import re
 import networkx as nx
 from enum import Enum
 from pathlib import Path
+from bioemu.openfold.np.residue_constants import rigid_group_atom_positions
 
 import torch
 import mdtraj as md
@@ -118,10 +119,71 @@ class FastFolderTrajectory:
             f"{self.molecule.value}-from-mae.pdb"
         )
 
-        # remove all hydrogens    
+        # Remove all hydrogens    
+        table, bonds = self.topology.to_dataframe()
         hydrogen_indices = [atom.index for atom in self.topology.atoms if atom.element.symbol == "H"]
         for i in hydrogen_indices[::-1]:
             self.topology.delete_atom_by_index(i)
+
+        # Remove extra atoms not in the frames
+        table, bonds = self.topology.to_dataframe()
+        st_top_len = len(list(self.topology.atoms))
+        for residue in self.topology.residues:
+            residue_frame = rigid_group_atom_positions[residue.name]
+            # residue frame elements are tuples of (atom symbol, residue index, (x, y, z))
+            frame_atoms = [atom[0] for atom in residue_frame]
+            top_residue_atoms = [atom.name for atom in residue.atoms]
+            assert set(frame_atoms).issubset(set(top_residue_atoms))
+            # had to comment this out because sometimes there is an extra oxygen on the residues like on tyrosine or serine
+            # compared to what's in the residue frame
+            # assert len(list(residue.atoms)) == len(residue_frame)
+            extra_atoms = [a for a in top_residue_atoms if a not in frame_atoms]
+            if len(extra_atoms) == 0: continue
+            print(f"Extra atoms in {residue.name}: {extra_atoms}")
+            for a in extra_atoms:
+                self.topology.delete_atom_by_index(residue.atom(a).index)
+        end_top_len = len(list(self.topology.atoms))
+        print(f"Removed {st_top_len - end_top_len} extra atoms from the topology")
+        print(f"Topology has {len(list(self.topology.atoms))} atoms and {len(list(self.topology.bonds))} bonds")
+
+        # Reorder the atoms for each residue according to the frame order
+        # See format of dataframe here https://mdtraj.org/1.9.4/api/generated/mdtraj.Topology.html
+        table, bonds = self.topology.to_dataframe()
+        assert np.all(bonds[:, 3:] == 0)
+        residue_ptr = 0
+        n_atoms = len(list(self.topology.atoms))
+        topology_to_frame = [None for _ in range(len(list(self.topology.atoms)))]
+        for residue in self.topology.residues:
+            residue_frame = rigid_group_atom_positions[residue.name]
+            frame_to_topology = [residue.atom(atom[0]).index for atom in residue_frame]
+            for frame_pos, top_idx in enumerate(frame_to_topology):
+                topology_to_frame[residue_ptr + frame_pos] = top_idx
+            # make sure the residue's atoms are consecutively laid out in the topology
+            # otherwise using this residue pointer doesn't make sense
+            assert residue_ptr == min(frame_to_topology)
+            # residue_ptr + len(residue_frame) is the start of the next residue
+            assert residue_ptr + len(residue_frame) - 1 == max(frame_to_topology)
+            residue_ptr += len(residue_frame)
+        assert None not in topology_to_frame
+        assert len(set(topology_to_frame)) == len(topology_to_frame)
+        assert len(topology_to_frame) == n_atoms
+        topology_to_frame = np.array(topology_to_frame)
+
+        # Reorder the atoms in the topology according to the frame order
+        table.index = topology_to_frame
+        table = table.sort_index()
+
+        # Bonds use the "serial" number
+        serial = table["serial"].values
+        bonds = np.array([b for b in bonds if b[0] in serial and b[1] in serial])
+        serial_to_index = {s: i for i, s in zip(table.index, serial)}
+        assert len(serial_to_index.values()) == len(table.index) # make sure all bonds have atoms still in the table
+        # for some reason this is not true, even after deleting the hydrogens
+        # assert len(np.unique(bonds)) == len(table.index) # make sure all atoms have bonds still
+        bonds = np.array([[serial_to_index[b[0]], serial_to_index[b[1]], 0, 0] for b in bonds]) # not sure what the last two columns are
+        table["serial"] = table.index
+
+        self.topology = md.Topology.from_dataframe(table, bonds)
 
         # Get masks to help get atoms of interest from the all atom topologies
         # WARNING: Although there are 20 residues, the number of atoms is not 20*5 = 100

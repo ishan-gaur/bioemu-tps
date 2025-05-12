@@ -230,7 +230,7 @@ def main(
             batch=context_batch,
             score_model=score_model,
             max_t=0.990,
-            eps_t=0.250
+            eps_t=0.01
         )
         assert isinstance(sampled_chemgraph_batch, Batch)
         sampled_chemgraphs = sampled_chemgraph_batch.to_data_list()
@@ -247,20 +247,20 @@ def main(
     if set(sequences) != {sequence}:
         raise ValueError(f"Expected all sequences to be {sequence}, but got {set(sequences)}")
     positions = torch.tensor(np.concatenate([np.load(f)["pos"] for f in samples_files]))
-    node_orientations = torch.tensor(
-        np.concatenate([np.load(f)["node_orientations"] for f in samples_files])
-    )
-    positions = torch.as_tensor(positions, dtype=torch.float32)
-    node_orientations = torch.as_tensor(node_orientations, dtype=torch.float32)
-    backbone_atoms = bioemu_interpolator.frame_to_euclidian_backbone(positions, node_orientations)
-    # torch.save(
-    #     backbone_atoms,
-    #     str(str(eval_folder) + f"/backbone-samples-bioemu_iid.pt"),
+    # node_orientations = torch.tensor(
+    #     np.concatenate([np.load(f)["node_orientations"] for f in samples_files])
     # )
+    positions = torch.as_tensor(positions, dtype=torch.float32)
+    # node_orientations = torch.as_tensor(node_orientations, dtype=torch.float32)
+    # backbone_atoms = bioemu_interpolator.frame_to_euclidian_backbone(positions, node_orientations)
     torch.save(
         positions,
-        str(str(eval_folder) + f"/samples_t=0.25-bioemu_iid.pt"),
+        str(str(eval_folder) + f"/backbone-samples-bioemu_iid.pt"),
     )
+    # torch.save(
+    #     positions,
+    #     str(str(eval_folder) + f"/samples_t=0.25-bioemu_iid.pt"),
+    # )
 
 if __name__ == "__main__":
     main()
