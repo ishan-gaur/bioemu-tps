@@ -1,5 +1,6 @@
 import os
 import re
+import copy
 import networkx as nx
 from enum import Enum
 from pathlib import Path
@@ -118,6 +119,7 @@ class FastFolderTrajectory:
             om_home / "datasets" / "folded_pdbs" / 
             f"{self.molecule.value}-from-mae.pdb"
         )
+        self.og_topology = copy.deepcopy(self.topology)
 
         # Remove all hydrogens    
         table, bonds = self.topology.to_dataframe()
@@ -170,8 +172,8 @@ class FastFolderTrajectory:
         topology_to_frame = np.array(topology_to_frame)
 
         # Reorder the atoms in the topology according to the frame order
-        table.index = topology_to_frame
-        table = table.sort_index()
+        table = table.iloc[topology_to_frame]
+        table.index = np.arange(len(table))
 
         # Bonds use the "serial" number
         serial = table["serial"].values
@@ -184,6 +186,23 @@ class FastFolderTrajectory:
         table["serial"] = table.index
 
         self.topology = md.Topology.from_dataframe(table, bonds)
+
+        # Mask and reordering to convert MAE coordinates to all-atom openfold-compatible coordinates
+        topology_atoms = [str(atom) for atom in self.topology.atoms]
+        og_topology_atoms = [str(atom) for atom in self.og_topology.atoms]
+        og_to_filtered_topology_mask = np.array([
+            atom in topology_atoms
+            for atom in og_topology_atoms
+        ])
+        assert np.sum(og_to_filtered_topology_mask) == len(list(self.topology.atoms))
+
+        og_to_filtered_topology_order = np.array([
+            topology_atoms.index(atom)
+            for i, atom in enumerate(og_topology_atoms)
+            if og_to_filtered_topology_mask[i]
+        ])
+        assert len(np.unique(og_to_filtered_topology_order)) == len(og_to_filtered_topology_order)
+        assert len(og_to_filtered_topology_order) == len(list(self.topology.atoms))
 
         # Get masks to help get atoms of interest from the all atom topologies
         # WARNING: Although there are 20 residues, the number of atoms is not 20*5 = 100
@@ -201,6 +220,8 @@ class FastFolderTrajectory:
             ref_data_home / self.molecule.value / "gt_traj_all_atom.pt",
             weights_only=False
         ) # shape is (1044000, 272, 3) 
+        self.ground_truth_traj_FAX = self.ground_truth_traj_FAX[:, og_to_filtered_topology_mask, :]
+        self.ground_truth_traj_FAX = self.ground_truth_traj_FAX[:, og_to_filtered_topology_order, :]
         # why does this not work with weights_only=True?
         # because it is a numpy array for some of these...
         if isinstance(self.ground_truth_traj_FAX, np.ndarray):

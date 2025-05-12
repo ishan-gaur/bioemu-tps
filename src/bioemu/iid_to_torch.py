@@ -229,8 +229,6 @@ def main(
             device=device,
             batch=context_batch,
             score_model=score_model,
-            max_t=0.990,
-            eps_t=0.01
         )
         assert isinstance(sampled_chemgraph_batch, Batch)
         sampled_chemgraphs = sampled_chemgraph_batch.to_data_list()
