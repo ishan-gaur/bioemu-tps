@@ -754,7 +754,16 @@ class Interpolator(torch.nn.Module):
                     # force_term = torch.zeros_like(distance_term)
 
                     # TODO, for now we're using the truncated action in the regime of low diffusion coefficient
-                    instability_term = (0.0 * self.D * self.dt / self.zeta_Ab).mean() # laplacian of the potential / divergence of the score
+                    divergence_PAb = torch.linalg.vector_norm(
+                        torch.autograd.grad(
+                            path_forces_PAbX,
+                            denoised_x_PAbX,
+                            grad_outputs=torch.ones_like(denoised_x_PAbX),
+                            retain_graph=True,
+                        )[0],
+                        dim=2,
+                    )
+                    instability_term = - (divergence_PAb * self.D * self.dt / self.zeta_Ab).mean() # laplacian of the potential / divergence of the score
 
                     action = distance_term + force_term + instability_term
                     # grads = torch.autograd.grad(action, denoised_x_PAbX, retain_graph=True)[0]
@@ -765,6 +774,7 @@ class Interpolator(torch.nn.Module):
                         force_term.item(),
                         instability_term.item(),
                     )
+                    
                     actions[b].append(action)
                     path_terms[b].append(distance_term)
                     force_terms[b].append(force_term)

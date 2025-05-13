@@ -31,7 +31,7 @@ def main(cfg: DictConfig) -> None:
         Ab: Backbone atom
         X: Spatial coordinates (3)
     """
-    exp_tag = None
+    exp_tag = "full"
     if exp_tag is not None:
         input(f"WARNING: You are running the experiment with the tag {exp_tag}. This may not be the intended experiment. Press Enter to continue or Ctrl+C to exit.")
     protein_name = cfg.protein_name

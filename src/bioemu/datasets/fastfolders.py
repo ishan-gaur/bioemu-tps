@@ -91,6 +91,7 @@ class FastFolderTrajectory:
         protein_name: str, # TRP_CAGE
         om_home: str | os.PathLike,
         ref_data_home: str | os.PathLike,
+        center_scale_traj: bool = True,
     ):
         """
         Args:
@@ -242,11 +243,12 @@ class FastFolderTrajectory:
         #     pre_saved_gt_traj,
         #     atol=1e-5
         # ), "Ground truth trajectory does not match the pre-saved one. Check the mae_to_pdb mapping or backbone mask."
-        self.ground_truth_traj_FAX -= self.ground_truth_traj_FAX.mean(dim=1, keepdims=True) # center
-        # Structure files, including this trajectory seem to be saved in nm by default
-        # however, in bioemu/src/bioemu/convert_chemgraph.py, the C-O bond length is in angstroms
-        # so convert everything to angstroms
-        self.ground_truth_traj_FAX = to_angstrom(self.ground_truth_traj_FAX) # convert to angstroms
+        if center_scale_traj:
+            self.ground_truth_traj_FAX -= self.ground_truth_traj_FAX.mean(dim=1, keepdims=True) # center
+            # Structure files, including this trajectory seem to be saved in nm by default
+            # however, in bioemu/src/bioemu/convert_chemgraph.py, the C-O bond length is in angstroms
+            # so convert everything to angstroms
+            self.ground_truth_traj_FAX = to_angstrom(self.ground_truth_traj_FAX) # convert to angstroms
 
         # These are the target start and end points for the interpolation
         # To get these run /home/ishan/OMBasics/two-for-one-diffusion/sample.py and set a breakpoint at line 758 for commit 6a8fbfa6

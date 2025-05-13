@@ -113,6 +113,7 @@ def main(
     bioemu_interpolator = cast(Interpolator, bioemu_interpolator)
 
     output_dir = Path(save_dir).expanduser().resolve()
+    output_dir = eval_folder / protein_name
     output_dir.mkdir(parents=True, exist_ok=True)  # Fail fast if output_dir is non-writeable
 
     ckpt_path, model_config_path = maybe_download_checkpoint(
@@ -253,7 +254,7 @@ def main(
     # backbone_atoms = bioemu_interpolator.frame_to_euclidian_backbone(positions, node_orientations)
     torch.save(
         positions,
-        str(str(eval_folder) + f"/backbone-samples-bioemu_iid.pt"),
+        str(str(eval_folder) + f"/samples-bioemu_iid.pt"),
     )
     # torch.save(
     #     positions,
