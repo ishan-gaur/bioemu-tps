@@ -62,7 +62,7 @@ class Interpolator(torch.nn.Module):
         gamma=10, # in the actual script I am stepping through, this is a tensor with value 12.0108, shape (n_paths,)
         # set as samp_args.om_gamma * torch.tensor(masses).to(device)
         D=0.015, # set as samp_args.om_d / (trainset.std if args.scale_data else 1.0) ** 2
-        force_scale=1.0, # fudge factor to reweight forces
+        action_temp=1.0, # fudge factor to reweight forces
         # Specify parameters for the interpolator
         latent_time=0.01, # BioEmu ranges from 0.990 to 0.001 or smthg
         initial_guess_level=0.25, # BioEmu ranges from 0.990 to 0.001 or smthg
@@ -123,7 +123,7 @@ class Interpolator(torch.nn.Module):
 
         self.zeta_Ab = gamma * torch.tensor(protein_trajectory.masses_Ab).to(self.device)
         self.D = D / protein_trajectory.std ** 2
-        self.force_scale = force_scale
+        self.force_scale = action_temp
         # self.action = action_cls(dt=self.dt, xi=(1 / self.gamma))
 
         self.score_model, self.sdes, self.denoiser = self.get_bioemu_models()

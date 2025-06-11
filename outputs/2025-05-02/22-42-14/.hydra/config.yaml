@@ -1,8 +1,0 @@
-protein_name: TRP_CAGE
-num_trajectories: 2
-path_length: 100
-dt: 0.001
-sample_batch_size: 2
-output_dir: /home/ishan/OMBasics/two-for-one-diffusion/saved_models
-seed: 0
-iterpolator: default

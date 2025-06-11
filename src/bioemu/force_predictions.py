@@ -116,6 +116,9 @@ def main(cfg: DictConfig) -> None:
     cosine_similarity_means = []
     cosine_similarity_stds = []
     backbone_to_CA = []
+    # want to reconstruct the backbone to C-alpha mask
+    # for this we have to go through all atoms and track if they were
+    # the C-alpha atom if they were in the backbone
     for i in range(len(protein_trajectory.c_alpha_mask_A)):
         if protein_trajectory.backbone_mask_A[i]:
             backbone_to_CA.append(
@@ -127,6 +130,7 @@ def main(cfg: DictConfig) -> None:
             output_dir / f"normalized_scores_FAbX_t_{t}.pt"
         )
         normalized_scores_FRX = normalized_scores_FAbX[:, backbone_to_CA_Ab]
+        # residue_averaged_score = 
         # cosine similarity
         # cosine_similarity_FAb = torch.einsum(
         #     "ijk,ijk->ij", force_unit_vec_FAbX, normalized_scores_FAbX
