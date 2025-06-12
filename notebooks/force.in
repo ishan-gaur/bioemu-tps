@@ -1,0 +1,17 @@
+
+Single point force calculation
+&cntrl
+  imin = 0,        ! Do MD instead of minimization
+  ntx = 1,         ! Read coordinates, no velocities
+  irest = 0,       ! Fresh run
+  nstlim = 1,      ! Take one MD step
+  dt = 0.00001,    ! Tiny timestep
+  ntb = 0,         ! Non-periodic
+  cut = 20.0,      ! Large cutoff
+  ntpr = 1,        ! Print energy
+  ntwx = 1,        ! Add coordinates for PyTraj
+  ntwv = 1,        ! Write forces to mdvel
+  ioutfm = 1,      ! Output format: NetCDF
+  ntf = 1,         ! Calculate all forces
+  ntc = 1          ! No SHAKE
+/

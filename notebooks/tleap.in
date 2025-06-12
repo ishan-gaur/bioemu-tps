@@ -1,0 +1,8 @@
+
+source leaprc.protein.ff14SB
+addPdbAtomMap {
+    { "H"  "H1" }
+}
+mol = loadpdb mae_all_atom_frame.pdb
+saveamberparm mol amber_frame.prmtop amber_frame.inpcrd
+quit
