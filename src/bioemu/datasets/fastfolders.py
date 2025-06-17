@@ -204,6 +204,8 @@ class FastFolderTrajectory:
         ])
         assert len(np.unique(og_to_filtered_topology_order)) == len(og_to_filtered_topology_order)
         assert len(og_to_filtered_topology_order) == len(list(self.topology.atoms))
+        self.og_to_filtered_topology_mask = og_to_filtered_topology_mask
+        self.og_to_filtered_topology_order = og_to_filtered_topology_order
 
         # Get masks to help get atoms of interest from the all atom topologies
         # WARNING: Although there are 20 residues, the number of atoms is not 20*5 = 100
@@ -217,11 +219,11 @@ class FastFolderTrajectory:
             [AA_CODE_TO_LETTER[residue.name] for residue in self.topology.residues]
         )
 
-        self.ground_truth_traj_FAX = torch.load(
+        self.ground_truth_traj_FAaX = torch.load(
             ref_data_home / self.molecule.value / "gt_traj_all_atom.pt",
             weights_only=False
         ) # shape is (1044000, 272, 3) 
-        self.ground_truth_traj_FAX = self.ground_truth_traj_FAX[:, og_to_filtered_topology_mask, :]
+        self.ground_truth_traj_FAX = self.ground_truth_traj_FAaX[:, og_to_filtered_topology_mask, :]
         self.ground_truth_traj_FAX = self.ground_truth_traj_FAX[:, og_to_filtered_topology_order, :]
         # why does this not work with weights_only=True?
         # because it is a numpy array for some of these...

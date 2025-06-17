@@ -503,7 +503,7 @@ class Interpolator(torch.nn.Module):
         batch = cast(ChemGraph, batch)
         return batch
 
-    def get_forces(self, x_BAbX, t):
+    def get_forces(self, x_BAbX, t, t_r=None, t_Q=None, return_rigid=False):
         r_BRX, Q_BRXX = self.backbone_euclidian_to_frame(x_BAbX)
         assert x_BAbX.shape[1] == torch.sum(self.frame_mask_RAf).item(), f"Number of atoms in x_BAbX ({x_BAbX.shape[1]}) does not match number of atoms in frames_RAfX ({torch.sum(self.frame_mask_RAf).item()})"
 
@@ -521,6 +521,12 @@ class Interpolator(torch.nn.Module):
             t = torch.full((x_BAbX.shape[0],), t, device=self.device)
         score = _get_score(batch=batch, t=t, score_model=self.score_model, sdes=self.sdes)
         score_r_BrX = score["pos"] # Br is batch * residue, which in this case is n_points * n_residues
+        if t_r is not None:
+            t_r = torch.ones_like(t) * t_r if isinstance(t_r, float) else t_r
+            score_r_BrX = _get_score(batch=batch, t=t_r, score_model=self.score_model, sdes=self.sdes)["pos"]
+        if t_Q is not None:
+            t_Q = torch.ones_like(t) * t_Q if isinstance(t_Q, float) else t_Q
+            score_Q_BrX = _get_score(batch=batch, t=t_Q, score_model=self.score_model, sdes=self.sdes)["node_orientations"]
         score_r_BRX = score_r_BrX.view(*r_BRX.shape)
         score_Q_BrX = score["node_orientations"] # if you look at the Euler-Maruyama integrator for this, it looks like this is a rotation vector
         score_Q_BrXX = rotvec_to_rotmat(score_Q_BrX)
@@ -534,18 +540,30 @@ class Interpolator(torch.nn.Module):
         # F_psinv_RXAf = torch.inverse(F_RXAf @ self.F_RAfX) @ F_RXAf
         F_pinv_RXAf = torch.linalg.pinv(self.F_RAfX)
 
+        # r component of the score in the x coordinate
         score_x_r_comp_BRAfX = torch.einsum("brx, a -> brax", score_r_BRX, A_1Af.squeeze())
         # score_x_Q_comp_BRAfX, residuals, rank, singular_values = torch.linalg.lstsq(F_RXAf, score_Q_BRXX)
         # B_BAfAf = torch.tile(B_AfAf[None, ...], (score_x_Q_comp_BRAfX.shape[0], 1, 1))
         B_RAfAf = torch.tile(B_AfAf[None, ...], (F_pinv_RXAf.shape[0], 1, 1))
         DG_Q_RAfX = (F_pinv_RXAf @ B_RAfAf).permute(0, 2, 1)
-        score_x_Q_comp_BRAfX = torch.einsum("brij, rai -> braj", score_Q_BRXX, DG_Q_RAfX)
+        # DG_Q_RXAf = F_pinv_RXAf @ B_RAfAf
+        # score_x_Q_comp_BRAfX = torch.einsum("rai, brij -> braj", DG_Q_RAfX, score_Q_BRXX)
+        score_x_Q_comp_BRAfX = torch.einsum("raj, brij -> brai", DG_Q_RAfX, score_Q_BRXX)
         score_x_BRAfX = score_x_r_comp_BRAfX + score_x_Q_comp_BRAfX
         # the mask below just gets rid of the padding for the glycine atoms
-        score_x_BAbX = score_x_BRAfX.flatten(1, 2)[:, self.frame_mask_RAf.flatten()].reshape(
-            score_x_BRAfX.shape[0], -1, 3
-        )
-        return score_x_BAbX
+        score_x_r_comp_BRAfX_rigid = torch.einsum("brx, a -> brax", score_r_BRX, torch.ones_like(A_1Af.squeeze()))
+        score_x_Q_comp_BRAfX_rigid = torch.einsum("brij, raj -> brai", score_Q_BRXX, self.F_RAfX)
+        score_x_BRAfX_rigid = score_x_r_comp_BRAfX_rigid + score_x_Q_comp_BRAfX_rigid
+        if return_rigid:
+            score_x_BAbX_rigid = score_x_BRAfX_rigid.flatten(1, 2)[:, self.frame_mask_RAf.flatten()].reshape(
+                score_x_BRAfX.shape[0], -1, 3
+            )
+            return score_x_BAbX_rigid
+        else:
+            score_x_BAbX = score_x_BRAfX.flatten(1, 2)[:, self.frame_mask_RAf.flatten()].reshape(
+                score_x_BRAfX.shape[0], -1, 3
+            )
+            return score_x_BAbX
 
     def forward(self, x1, x2, z=None):
         return self.om_interpolate(x1, x2)

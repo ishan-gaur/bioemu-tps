@@ -140,3 +140,11 @@ cython_debug/
 *.pdb
 
 outputs/
+
+*.inpcrd
+*.prmtop
+*.out
+*/mdcrd
+*/mdinfo
+*/mdvel
+*/restrt
